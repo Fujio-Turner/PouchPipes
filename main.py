@@ -10,7 +10,7 @@ bulk_get fallback, async parallel or sequential processing, and
 forwarding results to external systems (HTTP, RDBMS, Cloud).
 """
 
-__version__ = "2.2.3"
+__version__ = "2.3.0"
 
 import argparse
 import asyncio

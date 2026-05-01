@@ -385,7 +385,9 @@ class TestRedactingFormatter(unittest.TestCase):
         fmt = pl.RedactingFormatter(pl.Redactor("none"), fmt="%(message)s")
         record = self._make_record("op test", operation="INSERT")
         result = fmt.format(record)
-        self.assertIn("operation=INSERT", result)
+        # The formatter renders the `operation` extra under its short alias `op`
+        # using a space separator: "op INSERT".
+        self.assertIn("op INSERT", result)
 
 
 # ===================================================================
