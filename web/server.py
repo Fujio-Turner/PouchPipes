@@ -41,6 +41,8 @@ from rest.api_v2 import (
     api_put_table_rdbms_entry,
     api_delete_table_rdbms_entry,
     api_get_table_rdbms_used_by,
+    api_get_job_eventing,
+    api_put_job_eventing,
 )
 
 logger = logging.getLogger("changes_worker")
@@ -136,7 +138,18 @@ async def page_eventing(request):
 
 # --- Logs API ---
 
-_LOG_LINE_RE = re.compile(
+# New format: TIMESTAMP [LEVEL] [KEY] job=..JOB #s:..SESSION #b:BATCH LOGGER: MESSAGE | field value | ...
+_LOG_LINE_NEW_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[.,]\d{3})\s+"  # timestamp
+    r"\[(\w+)\]\s*"  # level
+    r"\[([A-Z_]+)\]\s+"  # log_key
+    r"(.*?)"  # prefix (job=.. #s:.. #b:..)
+    r"([\w.]+):\s+"  # logger
+    r"(.+)$"  # rest (message | fields)
+)
+
+# Legacy format: TIMESTAMP [LEVEL] LOGGER: MESSAGE [LOG_KEY] key=value ...
+_LOG_LINE_OLD_RE = re.compile(
     r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[.,]\d{3})\s+"  # timestamp
     r"\[(\w+)\]\s+"  # level
     r"([\w.]+):\s+"  # logger
@@ -145,7 +158,12 @@ _LOG_LINE_RE = re.compile(
 
 _LOG_KEY_RE = re.compile(r"\[([A-Z_]+)\]")
 
-# Known simple fields (before error_detail which can contain anything)
+# Context tag patterns in the prefix
+_JOB_TAG_RE = re.compile(r"job=\.\.(\S+)")
+_SESSION_TAG_RE = re.compile(r"#s:\.\.(\S+)")
+_BATCH_TAG_RE = re.compile(r"#b:(\S+)")
+
+# Known simple fields — legacy key=value format
 _SIMPLE_FIELDS = {
     "doc_id",
     "seq",
@@ -173,11 +191,79 @@ _SIMPLE_FIELDS = {
     "maintenance_type",
     "duration_ms",
     "operation",
+    "job_id",
 }
 
 
 def _parse_log_line(line: str) -> dict | None:
-    m = _LOG_LINE_RE.match(line.strip())
+    stripped = line.strip()
+    if not stripped:
+        return None
+
+    # Try new format first
+    m = _LOG_LINE_NEW_RE.match(stripped)
+    if m:
+        timestamp, level, log_key, prefix, logger_name, rest = m.groups()
+
+        # Extract context tags from prefix
+        job_tag = ""
+        session_tag = ""
+        batch_tag = ""
+        jm = _JOB_TAG_RE.search(prefix)
+        if jm:
+            job_tag = jm.group(1)
+        sm = _SESSION_TAG_RE.search(prefix)
+        if sm:
+            session_tag = sm.group(1)
+        bm = _BATCH_TAG_RE.search(prefix)
+        if bm:
+            batch_tag = bm.group(1)
+
+        # Parse pipe-delimited: MESSAGE_WITH_PIPES | field1 value | field2 value
+        # Fields are at the END.  Scan backwards from the last segment to find
+        # where the contiguous run of known-key segments starts.
+        fields = {}
+        message = rest
+        pipe_idx = rest.find(" | ")
+        if pipe_idx != -1:
+            segments = rest.split(" | ")
+            # Find the boundary: last non-field segment (scanning from end)
+            first_field = len(segments)
+            for i in range(len(segments) - 1, 0, -1):
+                seg = segments[i].strip()
+                if not seg:
+                    continue
+                sp = seg.find(" ")
+                key = seg[:sp] if sp != -1 else seg
+                if key in _PIPE_FIELD_KEYS:
+                    first_field = i
+                    fields[key] = seg[sp + 1 :] if sp != -1 else ""
+                else:
+                    break  # hit a non-field segment, stop
+            message = " | ".join(segments[:first_field])
+
+        # Inject context tags as fields for filtering
+        if job_tag:
+            fields["job_tag"] = job_tag
+        if session_tag:
+            fields["session"] = session_tag
+        if batch_tag:
+            fields["batch"] = batch_tag
+
+        return {
+            "timestamp": timestamp,
+            "level": level,
+            "logger": logger_name,
+            "message": message,
+            "log_key": log_key,
+            "fields": fields,
+            "job_tag": job_tag,
+            "session_tag": session_tag,
+            "batch_tag": batch_tag,
+        }
+
+    # Fallback: legacy format
+    m = _LOG_LINE_OLD_RE.match(stripped)
     if not m:
         return None
     timestamp, level, logger_name, rest = m.groups()
@@ -187,7 +273,6 @@ def _parse_log_line(line: str) -> dict | None:
     key_match = _LOG_KEY_RE.search(rest)
     if key_match:
         log_key = key_match.group(1)
-        # Message is everything before the log_key
         message = rest[: key_match.start()].strip()
         fields_str = rest[key_match.end() :].strip()
     else:
@@ -197,14 +282,12 @@ def _parse_log_line(line: str) -> dict | None:
     # Parse key=value fields
     fields = {}
     if fields_str:
-        # error_detail is special — it's always last and can contain anything
         ed_idx = fields_str.find("error_detail=")
         if ed_idx >= 0:
             before = fields_str[:ed_idx].strip()
             fields["error_detail"] = fields_str[ed_idx + len("error_detail=") :]
             fields_str = before
 
-        # Parse remaining simple key=value pairs
         for part in fields_str.split():
             if "=" in part:
                 k, v = part.split("=", 1)
@@ -218,43 +301,446 @@ def _parse_log_line(line: str) -> dict | None:
         "message": message,
         "log_key": log_key,
         "fields": fields,
+        "job_tag": "",
+        "session_tag": "",
+        "batch_tag": "",
     }
 
 
 _LEVEL_RANK = {"ERROR": 0, "WARNING": 1, "INFO": 2, "DEBUG": 3, "TRACE": 4}
 
 
+_CHUNK = 32_768  # 32 KB read chunk
+_INDEX_STEP = 1000  # record byte offset every N lines
+
+
+# ── Line-count + sparse index cache ───────────────────────
+# Keyed by resolved path string.  Invalidated when mtime or size changes.
+# {
+#   "mtime": float,
+#   "size":  int,
+#   "total": int,                     # total line count
+#   "index": { 0: 0, 1000: 82341, …} # line_number → byte_offset
+# }
+_line_cache: dict[str, dict] = {}
+
+
+def _get_line_info(path: Path) -> dict:
+    """Return total line count + sparse index for *path*.
+
+    First call scans the file counting newlines in 32 KB chunks — O(1) memory,
+    sequential I/O.  Records the byte offset every _INDEX_STEP lines for fast
+    seeking later.  Result is cached until the file's mtime or size changes.
+    """
+    stat = path.stat()
+    key = str(path)
+    cached = _line_cache.get(key)
+    if cached and cached["mtime"] == stat.st_mtime and cached["size"] == stat.st_size:
+        return cached
+
+    index: dict[int, int] = {0: 0}
+    total = 0
+    with open(path, "rb") as f:
+        while True:
+            offset_before = f.tell()
+            chunk = f.read(_CHUNK)
+            if not chunk:
+                break
+            pos = 0
+            while True:
+                nl = chunk.find(b"\n", pos)
+                if nl == -1:
+                    break
+                total += 1
+                if total % _INDEX_STEP == 0:
+                    index[total] = offset_before + nl + 1
+                pos = nl + 1
+
+    entry = {
+        "mtime": stat.st_mtime,
+        "size": stat.st_size,
+        "total": total,
+        "index": index,
+    }
+    _line_cache[key] = entry
+    return entry
+
+
+def _seek_to_line(path: Path, from_line: int):
+    """Seek a file to *from_line* using the sparse index.  Returns (file, info)."""
+    info = _get_line_info(path)
+    idx = info["index"]
+    nearest = 0
+    for k in idx:
+        if k <= from_line and k > nearest:
+            nearest = k
+    f = open(path, "rb")
+    f.seek(idx[nearest])
+    for _ in range(from_line - nearest):
+        f.readline()
+    return f, info
+
+
+# Maps log_key → pipeline stage (server-side, mirrors the frontend)
+_LOG_KEY_STAGE = {
+    "CHANGES": "source",
+    "HTTP": "source",
+    "PROCESSING": "process",
+    "EVENTING": "process",
+    "ATTACHMENT": "process",
+    "MAPPING": "process",
+    "FLOOD": "process",
+    "OUTPUT": "output",
+    "CHECKPOINT": "output",
+    "RETRY": "output",
+    "DLQ": "dlq",
+    "CBL": "infra",
+    "METRICS": "infra",
+    "CONTROL": "infra",
+    "SHUTDOWN": "infra",
+}
+
+_LEVEL_BADGE_CLS = {
+    "ERROR": "badge-error",
+    "CRITICAL": "badge-error",
+    "WARNING": "badge-warning",
+    "INFO": "badge-info",
+    "TRACE": "badge-ghost opacity-50",
+}
+
+_SKIP_FIELDS = {"doc_id", "job_tag", "session", "batch", "job_id"}
+
+# Known pipe-delimited field keys (log keys from GUIDE_LOGGING.md)
+# Used to distinguish "| field value" from message continuations
+_PIPE_FIELD_KEYS = {
+    "job",
+    "op",
+    "doc_id",
+    "seq",
+    "status",
+    "url",
+    "attempt",
+    "el_ms",
+    "dur_ms",
+    "out_ms",
+    "mode",
+    "method",
+    "bytes",
+    "store",
+    "batch",
+    "in_count",
+    "filt_count",
+    "host",
+    "port",
+    "delay_s",
+    "field_ct",
+    "err",
+    "doc_count",
+    "doc_type",
+    "seq_from",
+    "seq_to",
+    "inc_docs",
+    "fetched",
+    "docs_miss",
+    "attach",
+    "ok",
+    "failed",
+    "filt_out",
+    "chkpt",
+    "db_name",
+    "db_path",
+    "db_mb",
+    "manifest",
+    "maint",
+    "trigger",
+    "session",
+    # Source mutation audit fields (attachment post-process PUT/DELETE)
+    "rev",
+    "new_rev",
+    "pp_action",
+}
+
+
+def _esc(s: str) -> str:
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _render_line_html(entry: dict, idx: int) -> str:
+    """Build the HTML for a single log line — same output as the frontend renderLogs()."""
+    stage = _LOG_KEY_STAGE.get(entry.get("log_key") or "", "")
+    stage_cls = f" log-stage-{stage}" if stage else ""
+    parts = [
+        f'<div class="log-line flex flex-wrap items-start gap-2 px-3 py-1{stage_cls}" data-idx="{idx}" onclick="onLogClick({idx})">'
+    ]
+
+    # Timestamp
+    parts.append(f'<span class="log-ts">{_esc(entry.get("timestamp", ""))}</span>')
+
+    # Level badge
+    level = entry.get("level", "")
+    badge_cls = _LEVEL_BADGE_CLS.get(level, "badge-ghost")
+    parts.append(f'<span class="badge badge-xs {badge_cls}">{_esc(level)}</span>')
+
+    # Log key
+    log_key = entry.get("log_key") or ""
+    if log_key:
+        parts.append(
+            f'<span class="badge badge-outline badge-xs">{_esc(log_key)}</span>'
+        )
+
+    # Context tags
+    job_tag = entry.get("job_tag", "")
+    if job_tag:
+        parts.append(
+            f'<span class="badge badge-secondary badge-xs font-mono" title="Job tag">job:..{_esc(job_tag)}</span>'
+        )
+    session_tag = entry.get("session_tag", "")
+    if session_tag:
+        parts.append(
+            f'<span class="badge badge-accent badge-xs font-mono" title="Session ID">#s:..{_esc(session_tag)}</span>'
+        )
+    batch_tag = entry.get("batch_tag", "")
+    if batch_tag:
+        parts.append(
+            f'<span class="badge badge-primary badge-xs font-mono" title="Batch ID">#b:{_esc(batch_tag)}</span>'
+        )
+
+    # Doc ID
+    fields = entry.get("fields") or {}
+    doc_id = fields.get("doc_id", "")
+    if doc_id:
+        parts.append(
+            f'<span class="badge badge-primary badge-xs font-mono">📄 {_esc(doc_id)}</span>'
+        )
+
+    # Message
+    parts.append(
+        f'<span class="log-msg flex-1">{_esc(entry.get("message", ""))}</span>'
+    )
+
+    # Extra fields as badges
+    for k, v in fields.items():
+        if k in _SKIP_FIELDS:
+            continue
+        v_str = str(v)
+        if len(v_str) > 60:
+            v_str = v_str[:57] + "…"
+        parts.append(
+            f'<span class="badge badge-ghost badge-xs font-mono">{_esc(k)}={_esc(v_str)}</span>'
+        )
+
+    parts.append("</div>")
+    return "".join(parts)
+
+
+# Timestamp regex for binary search
+_TS_PREFIX_RE = re.compile(rb"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+
+
+def _find_line_for_time(path: Path, target: str) -> int:
+    """Binary search a chronologically-sorted log for *target* timestamp.
+
+    Returns the line number (0-based from top) of the first line whose
+    timestamp >= target.  Uses the sparse index to convert byte offset
+    to line number.
+    """
+    size = path.stat().st_size
+    if size == 0:
+        return 0
+    target_b = target.encode("utf-8")
+
+    # Binary search on byte offsets to find the target offset
+    with open(path, "rb") as f:
+        lo, hi = 0, size
+        while lo < hi:
+            mid = (lo + hi) // 2
+            f.seek(mid)
+            if mid > 0:
+                f.readline()  # skip to next complete line
+            line_start = f.tell()
+            if line_start >= size:
+                hi = mid
+                continue
+            line = f.readline()
+            m = _TS_PREFIX_RE.match(line)
+            if not m:
+                lo = line_start + len(line)
+                continue
+            if m.group(1) < target_b:
+                lo = line_start + len(line)
+            else:
+                hi = mid
+    target_offset = lo
+
+    # Convert byte offset → line number using the sparse index.
+    # Find the highest index entry whose offset <= target_offset,
+    # then count lines forward from there.
+    info = _get_line_info(path)
+    nearest_line = 0
+    nearest_offset = 0
+    for ln, off in info["index"].items():
+        if off <= target_offset and ln > nearest_line:
+            nearest_line = ln
+            nearest_offset = off
+
+    # Count lines from nearest_offset to target_offset
+    line_num = nearest_line
+    with open(path, "rb") as f:
+        f.seek(nearest_offset)
+        while f.tell() < target_offset:
+            raw = f.readline()
+            if not raw:
+                break
+            line_num += 1
+
+    return line_num
+
+
 async def get_logs(request):
-    max_lines = min(int(request.query.get("lines", "500")), 2000)
+    page_size = min(int(request.query.get("page_size", "500")), 5000)
     file_name = request.query.get("file", "changes_worker.log")
-    min_level = request.query.get("level", "").upper()  # e.g. "INFO" → skip DEBUG/TRACE
-    if not file_name.endswith(".log") or "/" in file_name or "\\" in file_name:
+    min_level = request.query.get("level", "").upper()
+    from_line_param = request.query.get("from_line", "")
+    before_time = request.query.get("before_time", "")
+
+    if not file_name.endswith(".log") or "\\" in file_name or ".." in file_name:
         return error_response("Invalid file name", 400)
-    log_path = ROOT / "logs" / file_name
+    log_path = (ROOT / "logs" / file_name).resolve()
+    if not str(log_path).startswith(str((ROOT / "logs").resolve())):
+        return error_response("Invalid file path", 400)
     if not log_path.is_file():
         return json_response([])
 
     level_threshold = _LEVEL_RANK.get(min_level, -1)
 
-    # Read last N lines efficiently
     try:
-        with open(log_path, "r", errors="replace") as f:
-            all_lines = f.readlines()
-        tail = all_lines[-max_lines:] if len(all_lines) > max_lines else all_lines
+        # Determine start line
+        if before_time:
+            target_line = _find_line_for_time(log_path, before_time)
+            start = max(0, target_line - page_size)
+        elif from_line_param:
+            start = int(from_line_param)
+        else:
+            info = _get_line_info(log_path)
+            start = max(0, info["total"] - page_size)
+
+        # Single pass: seek → read → parse → filter → build HTML → aggregate
+        f, info = _seek_to_line(log_path, start)
+        total = info["total"]
+        size = info["size"]
+
+        entries = []  # lightweight entries for client-side filtering/charts
+        html_lines = []  # pre-rendered HTML per line
+        level_counts = {"ERROR": 0, "WARNING": 0, "INFO": 0, "DEBUG": 0, "TRACE": 0}
+        stage_counts = {"source": 0, "process": 0, "output": 0, "dlq": 0, "infra": 0}
+        time_buckets = {}  # "YYYY-MM-DD HH:MM" → {errors,warnings,info,debug,source,process,...}
+        line_idx = 0
+
+        try:
+            while line_idx < page_size:
+                raw = f.readline()
+                if not raw:
+                    break
+                parsed = _parse_log_line(raw.decode("utf-8", errors="replace"))
+                if not parsed:
+                    line_idx += 1
+                    continue
+
+                line_idx += 1
+
+                # Level filter
+                if level_threshold >= 0:
+                    entry_rank = _LEVEL_RANK.get(parsed["level"], 4)
+                    if entry_rank > level_threshold:
+                        continue
+
+                # Aggregate: level + stage counts
+                lv = parsed["level"]
+                if lv in level_counts:
+                    level_counts[lv] += 1
+                stage = _LOG_KEY_STAGE.get(parsed.get("log_key") or "", "process")
+                if stage in stage_counts:
+                    stage_counts[stage] += 1
+
+                # Aggregate: time buckets for charts
+                ts = parsed.get("timestamp", "")
+                if len(ts) >= 16:
+                    bucket_key = ts[:16].replace(",", ".")  # "YYYY-MM-DD HH:MM"
+                    bkt = time_buckets.get(bucket_key)
+                    if not bkt:
+                        bkt = {
+                            "errors": 0,
+                            "warnings": 0,
+                            "info": 0,
+                            "debug": 0,
+                            "source": 0,
+                            "process": 0,
+                            "output": 0,
+                            "dlq": 0,
+                            "infra": 0,
+                            "docs_in": 0,
+                            "docs_out_ok": 0,
+                            "docs_out_fail": 0,
+                            "retries": 0,
+                        }
+                        time_buckets[bucket_key] = bkt
+                    if lv == "ERROR":
+                        bkt["errors"] += 1
+                    elif lv == "WARNING":
+                        bkt["warnings"] += 1
+                    elif lv == "INFO":
+                        bkt["info"] += 1
+                    elif lv == "DEBUG":
+                        bkt["debug"] += 1
+                    bkt[stage] = bkt.get(stage, 0) + 1
+                    fields = parsed.get("fields") or {}
+                    doc_count = fields.get("doc_count") or fields.get("batch")
+                    if doc_count:
+                        try:
+                            bkt["docs_in"] += int(doc_count)
+                        except ValueError:
+                            pass
+                    if stage == "output" and fields.get("doc_id"):
+                        if lv == "ERROR":
+                            bkt["docs_out_fail"] += 1
+                        else:
+                            bkt["docs_out_ok"] += 1
+                    if parsed.get("log_key") == "RETRY":
+                        bkt["retries"] += 1
+
+                # Build HTML for this line
+                html_lines.append(_render_line_html(parsed, len(entries)))
+
+                # Keep lightweight entry for client-side (search, insight, stakes)
+                entries.append(parsed)
+        finally:
+            f.close()
+
+        actual_from = start
+        actual_to = min(start + line_idx, total)
+
     except Exception as exc:
         return error_response(str(exc), 500)
 
-    entries = []
-    for line in tail:
-        parsed = _parse_log_line(line)
-        if parsed:
-            if level_threshold >= 0:
-                entry_rank = _LEVEL_RANK.get(parsed["level"], 4)
-                if entry_rank > level_threshold:
-                    continue
-            entries.append(parsed)
-
-    return json_response({"entries": entries, "total_lines": len(all_lines)})
+    return json_response(
+        {
+            "entries": entries,
+            "html": "".join(html_lines),
+            "counts": {"levels": level_counts, "stages": stage_counts},
+            "time_buckets": time_buckets,
+            "from_line": actual_from,
+            "to_line": actual_to,
+            "total_lines": total,
+            "file_size": size,
+            "has_older": actual_from > 0,
+            "has_newer": actual_to < total,
+        }
+    )
 
 
 async def get_log_files(request):
@@ -262,12 +748,14 @@ async def get_log_files(request):
     if not logs_dir.is_dir():
         return json_response([])
     files = []
-    for p in logs_dir.iterdir():
-        if p.is_file() and p.suffix == ".log":
+    for p in logs_dir.rglob("*.log"):
+        if p.is_file():
             stat = p.stat()
+            # Use path relative to logs/ so subdirectory files are addressable
+            rel = p.relative_to(logs_dir)
             files.append(
                 {
-                    "name": p.name,
+                    "name": str(rel),
                     "size_bytes": stat.st_size,
                     "modified": datetime.datetime.fromtimestamp(
                         stat.st_mtime, tz=datetime.timezone.utc
@@ -581,6 +1069,7 @@ async def dlq_meta(request):
                 "last_drained_at": None,
                 "last_inserted_job": None,
                 "last_drained_job": None,
+                "jobs": {},
             }
         )
     return json_response(CBLStore().get_dlq_meta())
@@ -664,7 +1153,13 @@ async def get_jobs(request):
 
         return json_response({"jobs": result_jobs, "count": len(result_jobs)})
     except Exception as e:
-        logger.exception("Error listing jobs")
+        log_event(
+            logger,
+            "error",
+            "CONTROL",
+            "error listing jobs",
+            error_detail="%s: %s" % (type(e).__name__, e),
+        )
         return error_response(str(e), status=500)
 
 
@@ -782,7 +1277,13 @@ async def get_jobs_status(request):
 
         return json_response({"jobs": result_jobs, "count": len(result_jobs)})
     except Exception as e:
-        logger.exception("Error loading jobs status")
+        log_event(
+            logger,
+            "error",
+            "CONTROL",
+            "error loading jobs status",
+            error_detail="%s: %s" % (type(e).__name__, e),
+        )
         return json_response({"jobs": [], "count": 0, "error": str(e)})
 
 
@@ -979,7 +1480,7 @@ async def job_control_proxy(request, endpoint: str):
         port = 9090
 
     url = f"http://{worker_host}:{port}/{endpoint}"
-    logger.debug(f"Proxying request to {url}")
+    log_event(logger, "debug", "CONTROL", "proxying request", url=url)
     try:
         # Increased timeout from 5s to 30s for job control operations
         # Job operations may take time due to thread pool executor and CBL operations
@@ -993,23 +1494,42 @@ async def job_control_proxy(request, endpoint: str):
                     # If response isn't JSON, get text instead
                     text = await resp.text()
                     data = {"error": f"Invalid response from metrics server: {text}"}
-                logger.debug(f"Proxy response: {resp.status}")
+                log_event(
+                    logger, "debug", "CONTROL", "proxy response", status=resp.status
+                )
                 return json_response(data, status=resp.status)
     except _aiohttp.ClientConnectorError as exc:
-        logger.error(f"Cannot connect to metrics server at {url}: {exc}")
+        log_event(
+            logger,
+            "error",
+            "CONTROL",
+            "cannot connect to metrics server",
+            url=url,
+            error_detail="%s" % exc,
+        )
         return json_response(
             {"error": f"Metrics server unreachable: {exc}"}, status=502
         )
     except asyncio.TimeoutError as exc:
-        logger.error(f"Timeout calling metrics server at {url} after 30s")
+        log_event(
+            logger,
+            "error",
+            "CONTROL",
+            "timeout calling metrics server",
+            url=url,
+            timeout_s=30,
+        )
         return json_response(
             {"error": "Job operation timed out - may be slow"}, status=504
         )
     except Exception as exc:
-        import traceback
-
-        logger.error(f"Job control proxy error: {exc}")
-        logger.error(traceback.format_exc())
+        log_event(
+            logger,
+            "error",
+            "CONTROL",
+            "job control proxy error",
+            error_detail="%s" % exc,
+        )
         return json_response({"error": f"Proxy error: {str(exc)}"}, status=502)
 
 
@@ -1108,8 +1628,16 @@ async def get_sample_doc(request):
                 data = await resp.json()
                 results = data.get("results", [])
                 if not results:
+                    # Connection ok, feed empty. Surface as a warning
+                    # rather than an error so the GUI does not falsely
+                    # report a connection failure.
                     return json_response(
-                        {"error": "no_docs", "detail": "No documents in changes feed"}
+                        {
+                            "ok": True,
+                            "warning": "no_docs",
+                            "detail": "Connected, but the changes feed has no documents.",
+                            "pool_size": 0,
+                        }
                     )
                 pick = random.choice(results)
                 doc = pick.get("doc", pick)
@@ -1769,12 +2297,26 @@ def _auto_map(src_fields: list, table_defs: list) -> dict:
 
 
 async def wizard_test_source(request):
-    """Test connectivity to SG/App Services/Edge Server and return a random sample doc."""
+    """Test connectivity to SG/App Services/Edge Server and return a random sample doc.
+
+    Every test attempt is logged via the GUIDE_LOGGING.md ``[CONTROL]`` /
+    ``[HTTP]`` log keys with the **full URL**, auth method, status code,
+    elapsed time, and error class so operators can grep the Logs page to
+    diagnose failures.  The full URL is also echoed in every JSON response
+    so the GUI can display "we tried this exact URL" on success or failure.
+    """
     import random
+    import time as _time
 
     try:
         body = await request.json()
     except json.JSONDecodeError:
+        log_event(
+            logger,
+            "warn",
+            "CONTROL",
+            "test-source: invalid JSON body",
+        )
         return error_response("Invalid JSON")
 
     gw = body.get("gateway", {})
@@ -1786,6 +2328,13 @@ async def wizard_test_source(request):
     src = gw.get("src", "sync_gateway")
 
     if not url or not db:
+        log_event(
+            logger,
+            "warn",
+            "CONTROL",
+            "test-source: missing url or database",
+            mode=src,
+        )
         return error_response("URL and database are required")
 
     # All Couchbase sources use keyspace format: db.scope.collection
@@ -1797,6 +2346,17 @@ async def wizard_test_source(request):
         changes_url = f"{url}/{db}/_changes"
 
     params = {"limit": "100", "include_docs": "true", "since": "0"}
+    auth_method = auth_cfg.get("method", "none")
+
+    log_event(
+        logger,
+        "info",
+        "CONTROL",
+        "test-source: begin (auth=%s, src=%s)" % (auth_method, src),
+        http_method="GET",
+        url=changes_url,
+        mode=src,
+    )
 
     import aiohttp as _aiohttp
 
@@ -1809,17 +2369,17 @@ async def wizard_test_source(request):
         ssl_ctx.verify_mode = ssl.CERT_NONE
 
     headers = {}
-    method = auth_cfg.get("method", "none")
     basic_auth = None
-    if method == "basic" and auth_cfg.get("username"):
+    if auth_method == "basic" and auth_cfg.get("username"):
         basic_auth = _aiohttp.BasicAuth(
             auth_cfg["username"], auth_cfg.get("password", "")
         )
-    elif method == "bearer" and auth_cfg.get("bearer_token"):
+    elif auth_method == "bearer" and auth_cfg.get("bearer_token"):
         headers["Authorization"] = f"Bearer {auth_cfg['bearer_token']}"
-    elif method == "session" and auth_cfg.get("session_cookie"):
+    elif auth_method == "session" and auth_cfg.get("session_cookie"):
         headers["Cookie"] = f"SyncGatewaySession={auth_cfg['session_cookie']}"
 
+    t0 = _time.monotonic()
     try:
         connector = (
             _aiohttp.TCPConnector(ssl=ssl_ctx) if ssl_ctx else _aiohttp.TCPConnector()
@@ -1832,19 +2392,262 @@ async def wizard_test_source(request):
                 headers=headers,
                 timeout=_aiohttp.ClientTimeout(total=10),
             ) as resp:
-                data = await resp.json()
+                elapsed_ms = (_time.monotonic() - t0) * 1000.0
+                # Log the response — even a 4xx/5xx is "got something back"
+                if 400 <= resp.status < 600:
+                    body_preview = ""
+                    try:
+                        body_preview = (await resp.text())[:200]
+                    except Exception:
+                        pass
+                    log_event(
+                        logger,
+                        "warn",
+                        "HTTP",
+                        "test-source: got HTTP %d" % resp.status,
+                        http_method="GET",
+                        url=changes_url,
+                        status=resp.status,
+                        elapsed_ms=round(elapsed_ms, 1),
+                        mode=src,
+                        error_detail=body_preview,
+                    )
+                    return json_response(
+                        {
+                            "error": "http_%d" % resp.status,
+                            "detail": body_preview or ("HTTP %d" % resp.status),
+                            "url": changes_url,
+                            "status": resp.status,
+                            "auth_method": auth_method,
+                            "elapsed_ms": round(elapsed_ms, 1),
+                        },
+                        status=200,
+                    )
+                try:
+                    data = await resp.json()
+                except Exception as exc:
+                    log_event(
+                        logger,
+                        "error",
+                        "HTTP",
+                        "test-source: response was not JSON",
+                        http_method="GET",
+                        url=changes_url,
+                        status=resp.status,
+                        elapsed_ms=round(elapsed_ms, 1),
+                        mode=src,
+                        error_class=type(exc).__name__,
+                        error_detail=str(exc)[:200],
+                    )
+                    return json_response(
+                        {
+                            "error": "invalid_response",
+                            "detail": "Response was not JSON: %s" % exc,
+                            "url": changes_url,
+                            "status": resp.status,
+                            "auth_method": auth_method,
+                        },
+                        status=200,
+                    )
                 results = data.get("results", [])
                 if not results:
+                    log_event(
+                        logger,
+                        "warn",
+                        "CONTROL",
+                        "test-source: connected but no docs in feed",
+                        http_method="GET",
+                        url=changes_url,
+                        status=resp.status,
+                        elapsed_ms=round(elapsed_ms, 1),
+                        mode=src,
+                    )
+                    # Connection succeeded — the changes feed is just
+                    # empty. Treat as ok so the GUI does not show
+                    # "Connection failed" for what is really a healthy
+                    # but empty source.
                     return json_response(
-                        {"error": "no_docs", "detail": "No documents in changes feed"}
+                        {
+                            "ok": True,
+                            "warning": "no_docs",
+                            "detail": (
+                                "Connected successfully (HTTP %d) but the "
+                                "changes feed has no documents to sample."
+                            )
+                            % resp.status,
+                            "url": changes_url,
+                            "status": resp.status,
+                            "auth_method": auth_method,
+                            "elapsed_ms": round(elapsed_ms, 1),
+                            "pool_size": 0,
+                        }
                     )
                 pick = random.choice(results)
                 doc = pick.get("doc", pick)
-                return json_response(
-                    {"ok": True, "doc": doc, "pool_size": len(results)}
+                log_event(
+                    logger,
+                    "info",
+                    "CONTROL",
+                    "test-source: ok (%d docs sampled)" % len(results),
+                    http_method="GET",
+                    url=changes_url,
+                    status=resp.status,
+                    elapsed_ms=round(elapsed_ms, 1),
+                    mode=src,
+                    doc_count=len(results),
                 )
+                return json_response(
+                    {
+                        "ok": True,
+                        "doc": doc,
+                        "pool_size": len(results),
+                        "url": changes_url,
+                        "status": resp.status,
+                        "auth_method": auth_method,
+                        "elapsed_ms": round(elapsed_ms, 1),
+                    }
+                )
+    except _aiohttp.ClientConnectorError as exc:
+        elapsed_ms = (_time.monotonic() - t0) * 1000.0
+        # Auto-diagnose common scheme/cert misconfigurations so the
+        # operator doesn't have to read mbedTLS errors.
+        hint = None
+        s = str(exc).lower()
+        if "ssl" in s or "certificate" in s or "tls" in s:
+            if not gw.get("accept_self_signed_certs"):
+                hint = (
+                    "TLS/SSL handshake failed. If the source uses a "
+                    "self-signed certificate (e.g. local Couchbase Edge "
+                    "Server), enable 'Accept self-signed certs' on this "
+                    "input."
+                )
+            else:
+                hint = (
+                    "TLS handshake failed even with self-signed certs "
+                    "accepted. Check that the URL scheme matches the "
+                    "server (https vs http) and the port is correct."
+                )
+        elif changes_url.startswith("http://"):
+            hint = (
+                "Connection refused/dropped on http://. If the server "
+                "is HTTPS-only (Couchbase Edge Server defaults to TLS), "
+                "change the URL to https://."
+            )
+        log_event(
+            logger,
+            "error",
+            "HTTP",
+            "test-source: connect failed (DNS/refused/SSL)"
+            + (" — %s" % hint if hint else ""),
+            http_method="GET",
+            url=changes_url,
+            elapsed_ms=round(elapsed_ms, 1),
+            mode=src,
+            error_class=type(exc).__name__,
+            error_detail=str(exc)[:300],
+        )
+        return json_response(
+            {
+                "error": "connect_failed",
+                "detail": str(exc),
+                "hint": hint,
+                "url": changes_url,
+                "auth_method": auth_method,
+                "error_class": type(exc).__name__,
+                "elapsed_ms": round(elapsed_ms, 1),
+            },
+            status=200,
+        )
+    except _aiohttp.ClientError as exc:
+        # Catches ServerDisconnectedError, ClientPayloadError,
+        # ClientResponseError, etc.  This is what fires when you point
+        # http:// at an https-only port and the server resets/disconnects
+        # mid-stream (the symptom that used to fall through to
+        # "fetch_failed").
+        elapsed_ms = (_time.monotonic() - t0) * 1000.0
+        hint = None
+        if changes_url.startswith("http://"):
+            hint = (
+                "The server closed the connection. If the source is "
+                "HTTPS-only (e.g. Couchbase Edge Server with TLS), change "
+                "the URL scheme to https:// and enable 'Accept self-signed "
+                "certs' if using a self-signed cert."
+            )
+        log_event(
+            logger,
+            "error",
+            "HTTP",
+            "test-source: client error (%s)" % type(exc).__name__
+            + (" — %s" % hint if hint else ""),
+            http_method="GET",
+            url=changes_url,
+            elapsed_ms=round(elapsed_ms, 1),
+            mode=src,
+            error_class=type(exc).__name__,
+            error_detail=str(exc)[:300],
+        )
+        return json_response(
+            {
+                "error": "client_error",
+                "detail": str(exc) or type(exc).__name__,
+                "hint": hint,
+                "url": changes_url,
+                "auth_method": auth_method,
+                "error_class": type(exc).__name__,
+                "elapsed_ms": round(elapsed_ms, 1),
+            },
+            status=200,
+        )
+    except asyncio.TimeoutError as exc:
+        elapsed_ms = (_time.monotonic() - t0) * 1000.0
+        log_event(
+            logger,
+            "error",
+            "HTTP",
+            "test-source: timeout (10s)",
+            http_method="GET",
+            url=changes_url,
+            elapsed_ms=round(elapsed_ms, 1),
+            mode=src,
+            error_class=type(exc).__name__,
+            error_detail="Connection timed out after 10s",
+        )
+        return json_response(
+            {
+                "error": "timeout",
+                "detail": "Connection timed out after 10s",
+                "url": changes_url,
+                "auth_method": auth_method,
+                "error_class": "TimeoutError",
+                "elapsed_ms": round(elapsed_ms, 1),
+            },
+            status=200,
+        )
     except Exception as exc:
-        return json_response({"error": "fetch_failed", "detail": str(exc)}, status=500)
+        elapsed_ms = (_time.monotonic() - t0) * 1000.0
+        log_event(
+            logger,
+            "error",
+            "HTTP",
+            "test-source: unexpected error",
+            http_method="GET",
+            url=changes_url,
+            elapsed_ms=round(elapsed_ms, 1),
+            mode=src,
+            error_class=type(exc).__name__,
+            error_detail=str(exc)[:300],
+        )
+        return json_response(
+            {
+                "error": "fetch_failed",
+                "detail": str(exc),
+                "url": changes_url,
+                "auth_method": auth_method,
+                "error_class": type(exc).__name__,
+                "elapsed_ms": round(elapsed_ms, 1),
+            },
+            status=500,
+        )
 
 
 async def wizard_test_output(request):
@@ -2166,10 +2969,18 @@ async def clear_all_sources(request):
 
 
 async def test_source(request):
-    """Test connection to a Couchbase Sync Gateway."""
+    """Test connection to a Couchbase Sync Gateway.
+
+    Audit-logged via ``[CONTROL]`` / ``[HTTP]`` per GUIDE_LOGGING.md.
+    Every JSON response carries the full ``url`` that was tried so the
+    GUI can show the operator exactly which endpoint we hit.
+    """
+    import time as _time
+
     try:
         body = await request.json()
     except json.JSONDecodeError:
+        log_event(logger, "warn", "CONTROL", "source/test: invalid JSON body")
         return error_response("Invalid JSON")
 
     url = body.get("url", "").strip()
@@ -2179,41 +2990,52 @@ async def test_source(request):
     auth_method = body.get("auth_method", "none").strip()
 
     if not url or not database:
+        log_event(
+            logger,
+            "warn",
+            "CONTROL",
+            "source/test: missing url or database",
+        )
         return error_response("url and database are required")
 
+    # Construct the changes endpoint URL
+    # Sync Gateway uses keyspace format: db.scope.collection
+    if scope and scope != "_default" and collection and collection != "_default":
+        test_url = f"{url}/{database}.{scope}.{collection}/_changes"
+    elif collection and collection != "_default":
+        test_url = f"{url}/{database}.{collection}/_changes"
+    else:
+        test_url = f"{url}/{database}/_changes"
+
+    log_event(
+        logger,
+        "info",
+        "CONTROL",
+        "source/test: begin (auth=%s)" % auth_method,
+        http_method="GET",
+        url=test_url,
+    )
+
+    headers = {}
+    if auth_method == "basic":
+        username = body.get("username", "").strip()
+        password = body.get("password", "").strip()
+        if username and password:
+            import base64
+
+            credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
+            headers["Authorization"] = f"Basic {credentials}"
+    elif auth_method == "session":
+        session_cookie = body.get("session_cookie", "").strip()
+        if session_cookie:
+            headers["Cookie"] = f"SyncGatewaySession={session_cookie}"
+    elif auth_method == "bearer":
+        bearer_token = body.get("bearer_token", "").strip()
+        if bearer_token:
+            headers["Authorization"] = f"Bearer {bearer_token}"
+
+    t0 = _time.monotonic()
     try:
-        # Try a simple GET to the database endpoint
-        headers = {}
-        auth = None
-
-        if auth_method == "basic":
-            username = body.get("username", "").strip()
-            password = body.get("password", "").strip()
-            if username and password:
-                import base64
-
-                credentials = base64.b64encode(
-                    f"{username}:{password}".encode()
-                ).decode()
-                headers["Authorization"] = f"Basic {credentials}"
-        elif auth_method == "session":
-            session_cookie = body.get("session_cookie", "").strip()
-            if session_cookie:
-                headers["Cookie"] = f"SyncGatewaySession={session_cookie}"
-        elif auth_method == "bearer":
-            bearer_token = body.get("bearer_token", "").strip()
-            if bearer_token:
-                headers["Authorization"] = f"Bearer {bearer_token}"
-
-        # Construct the changes endpoint URL
-        # Sync Gateway uses keyspace format: db.scope.collection
-        if scope and scope != "_default" and collection and collection != "_default":
-            test_url = f"{url}/{database}.{scope}.{collection}/_changes"
-        elif collection and collection != "_default":
-            test_url = f"{url}/{database}.{collection}/_changes"
-        else:
-            test_url = f"{url}/{database}/_changes"
-
         # Make a request to test connection
         async with _aiohttp.ClientSession() as session:
             async with session.get(
@@ -2222,15 +3044,121 @@ async def test_source(request):
                 timeout=_aiohttp.ClientTimeout(total=10),
                 ssl=False,
             ) as resp:
+                elapsed_ms = (_time.monotonic() - t0) * 1000.0
                 if resp.status in [200, 400, 401, 403]:
-                    # Got a response, connection works
-                    return json_response({"ok": True, "status": resp.status})
-                else:
-                    return json_response(
-                        {"ok": False, "error": f"HTTP {resp.status}"}, status=200
+                    log_event(
+                        logger,
+                        "info",
+                        "CONTROL",
+                        "source/test: reachable (HTTP %d)" % resp.status,
+                        http_method="GET",
+                        url=test_url,
+                        status=resp.status,
+                        elapsed_ms=round(elapsed_ms, 1),
                     )
+                    return json_response(
+                        {
+                            "ok": True,
+                            "status": resp.status,
+                            "url": test_url,
+                            "auth_method": auth_method,
+                            "elapsed_ms": round(elapsed_ms, 1),
+                        }
+                    )
+                else:
+                    log_event(
+                        logger,
+                        "warn",
+                        "HTTP",
+                        "source/test: unexpected HTTP %d" % resp.status,
+                        http_method="GET",
+                        url=test_url,
+                        status=resp.status,
+                        elapsed_ms=round(elapsed_ms, 1),
+                    )
+                    return json_response(
+                        {
+                            "ok": False,
+                            "error": f"HTTP {resp.status}",
+                            "url": test_url,
+                            "status": resp.status,
+                            "auth_method": auth_method,
+                            "elapsed_ms": round(elapsed_ms, 1),
+                        },
+                        status=200,
+                    )
+    except _aiohttp.ClientConnectorError as exc:
+        elapsed_ms = (_time.monotonic() - t0) * 1000.0
+        log_event(
+            logger,
+            "error",
+            "HTTP",
+            "source/test: connect failed (DNS/refused/SSL)",
+            http_method="GET",
+            url=test_url,
+            elapsed_ms=round(elapsed_ms, 1),
+            error_class=type(exc).__name__,
+            error_detail=str(exc)[:300],
+        )
+        return json_response(
+            {
+                "ok": False,
+                "error": str(exc),
+                "url": test_url,
+                "auth_method": auth_method,
+                "error_class": type(exc).__name__,
+                "elapsed_ms": round(elapsed_ms, 1),
+            },
+            status=200,
+        )
+    except asyncio.TimeoutError as exc:
+        elapsed_ms = (_time.monotonic() - t0) * 1000.0
+        log_event(
+            logger,
+            "error",
+            "HTTP",
+            "source/test: timeout (10s)",
+            http_method="GET",
+            url=test_url,
+            elapsed_ms=round(elapsed_ms, 1),
+            error_class=type(exc).__name__,
+            error_detail="Connection timed out after 10s",
+        )
+        return json_response(
+            {
+                "ok": False,
+                "error": "Connection timed out after 10s",
+                "url": test_url,
+                "auth_method": auth_method,
+                "error_class": "TimeoutError",
+                "elapsed_ms": round(elapsed_ms, 1),
+            },
+            status=200,
+        )
     except Exception as exc:
-        return json_response({"ok": False, "error": str(exc)}, status=200)
+        elapsed_ms = (_time.monotonic() - t0) * 1000.0
+        log_event(
+            logger,
+            "error",
+            "HTTP",
+            "source/test: unexpected error",
+            http_method="GET",
+            url=test_url,
+            elapsed_ms=round(elapsed_ms, 1),
+            error_class=type(exc).__name__,
+            error_detail=str(exc)[:300],
+        )
+        return json_response(
+            {
+                "ok": False,
+                "error": str(exc),
+                "url": test_url,
+                "auth_method": auth_method,
+                "error_class": type(exc).__name__,
+                "elapsed_ms": round(elapsed_ms, 1),
+            },
+            status=200,
+        )
 
 
 # --- App factory ---
@@ -2366,6 +3294,10 @@ def create_app():
     app.router.add_post("/api/v2/jobs/{id}/refresh-input", api_refresh_job_input)
     app.router.add_post("/api/v2/jobs/{id}/refresh-output", api_refresh_job_output)
     app.router.add_put("/api/v2/jobs/{id}/mapping", api_put_job_mapping)
+
+    # API v2.0 - Eventing
+    app.router.add_get("/api/v2/jobs/{id}/eventing", api_get_job_eventing)
+    app.router.add_put("/api/v2/jobs/{id}/eventing", api_put_job_eventing)
 
     # API v2.0 - RDBMS Table Definitions
     app.router.add_get("/api/v2/tables_rdbms", api_get_tables_rdbms)

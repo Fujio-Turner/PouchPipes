@@ -98,6 +98,90 @@
       },
       "additionalProperties": true
     },
+    "eventing": {
+      "type": ["object", "null"],
+      "description": "Eventing configuration — user-programmable JavaScript OnUpdate/OnDelete handlers",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether eventing is active for this job"
+        },
+        "handler": {
+          "type": "string",
+          "description": "JavaScript source code containing OnUpdate and/or OnDelete functions"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "default": 5000,
+          "minimum": 100,
+          "maximum": 60000,
+          "description": "Max execution time per handler invocation (ms)"
+        },
+        "on_error": {
+          "type": "string",
+          "enum": ["reject", "pass", "halt"],
+          "default": "reject",
+          "description": "Behavior when JS handler throws an exception"
+        },
+        "on_timeout": {
+          "type": "string",
+          "enum": ["reject", "pass", "halt"],
+          "default": "reject",
+          "description": "Behavior when timeout_ms is exceeded"
+        },
+        "description": {
+          "type": ["string", "null"],
+          "default": "",
+          "description": "Human-readable description of what this handler does"
+        },
+        "constants": {
+          "type": "array",
+          "default": [],
+          "description": "User-defined constants injected as JS globals",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string",
+                "description": "Variable name (must be valid JS identifier)"
+              },
+              "value": {
+                "description": "Constant value (string, number, boolean, or null)"
+              }
+            },
+            "required": ["key", "value"]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "recursion_guard": {
+      "type": ["object", "null"],
+      "description": "Write-back recursion protection — suppresses echoes when the pipeline PUTs documents back to the source",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether recursion guard is active for this job"
+        },
+        "max_tracked_docs": {
+          "type": "integer",
+          "default": 50000,
+          "minimum": 100,
+          "maximum": 1000000,
+          "description": "Maximum number of doc IDs to track in the LRU cache"
+        },
+        "ttl_seconds": {
+          "type": "integer",
+          "default": 300,
+          "minimum": 10,
+          "maximum": 86400,
+          "description": "Time-to-live in seconds for tracked entries"
+        }
+      },
+      "additionalProperties": false
+    },
     "state": {
       "type": "object",
       "description": "Current job execution state",
@@ -182,6 +266,17 @@
             "source": "type",
             "destination": "doc_type"
           }
+        ]
+      },
+      "eventing": {
+        "enabled": true,
+        "handler": "function OnUpdate(doc, meta) {\n  doc.processed_at = Date.now();\n  return doc;\n}\n\nfunction OnDelete(meta) {\n  log(\"deleted\", meta._id);\n}",
+        "timeout_ms": 5000,
+        "on_error": "reject",
+        "on_timeout": "reject",
+        "description": "Enrich hotel docs before mapping",
+        "constants": [
+          {"key": "region", "value": "us-east-1"}
         ]
       },
       "state": {

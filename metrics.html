@@ -254,6 +254,8 @@
     <li><a href="#auth">Auth Tracking Metrics</a></li>
     <li><a href="#flood">Flood / Backpressure Metrics</a></li>
     <li><a href="#attachments">Attachment Metrics</a></li>
+    <li><a href="#eventing">Eventing Metrics (JS Handlers)</a></li>
+    <li><a href="#recursion-guard">Recursion Guard Metrics</a></li>
     <li><a href="#dlq">DLQ Metrics</a></li>
     <li><a href="#timing">Additional Timing Summaries</a></li>
     <li><a href="#additional-output">Additional Output Metrics</a></li>
@@ -1263,6 +1265,83 @@ changes_worker_checkpoint_seq</pre></dd>
 <div class="metric">
   <div><span class="metric-name">changes_worker_attachments_temp_files_cleaned_total</span> <span class="metric-type badge-counter">counter</span></div>
   <p class="metric-desc">Temporary attachment files cleaned up from disk.</p>
+</div>
+
+<!-- ================================================================ -->
+<!-- EVENTING (JS HANDLERS) -->
+<!-- ================================================================ -->
+<div id="eventing" class="section-header">
+  <div class="section-icon counter">⚡</div>
+  <h2>Eventing Metrics (JS Handlers)</h2>
+</div>
+
+<p style="color: var(--text-muted); margin-bottom: 1rem;">Metrics for the user-programmable JavaScript <code>OnUpdate</code> / <code>OnDelete</code> handlers that run between the <code>_changes</code> feed and the Schema Mapper.</p>
+
+<div class="metric">
+  <div><span class="metric-name">changes_worker_eventing_invocations_total</span> <span class="metric-type badge-counter">counter</span></div>
+  <p class="metric-desc">Total handler calls (OnUpdate + OnDelete).</p>
+</div>
+<div class="metric">
+  <div><span class="metric-name">changes_worker_eventing_updates_total</span> <span class="metric-type badge-counter">counter</span></div>
+  <p class="metric-desc">OnUpdate handler calls.</p>
+</div>
+<div class="metric">
+  <div><span class="metric-name">changes_worker_eventing_deletes_total</span> <span class="metric-type badge-counter">counter</span></div>
+  <p class="metric-desc">OnDelete handler calls.</p>
+</div>
+<div class="metric">
+  <div><span class="metric-name">changes_worker_eventing_passed_total</span> <span class="metric-type badge-counter">counter</span></div>
+  <p class="metric-desc">Documents that passed through the handler (truthy return).</p>
+</div>
+<div class="metric">
+  <div><span class="metric-name">changes_worker_eventing_rejected_total</span> <span class="metric-type badge-counter">counter</span></div>
+  <p class="metric-desc">Documents rejected by the handler (falsy/void return).</p>
+</div>
+<div class="metric">
+  <div><span class="metric-name">changes_worker_eventing_errors_total</span> <span class="metric-type badge-counter">counter</span></div>
+  <p class="metric-desc">JS handler exceptions (on_error policy applied).</p>
+</div>
+<div class="metric">
+  <div><span class="metric-name">changes_worker_eventing_timeouts_total</span> <span class="metric-type badge-counter">counter</span></div>
+  <p class="metric-desc">Handler exceeded <code>timeout_ms</code> (on_timeout policy applied).</p>
+</div>
+<div class="metric">
+  <div><span class="metric-name">changes_worker_eventing_halts_total</span> <span class="metric-type badge-counter">counter</span></div>
+  <p class="metric-desc">Eventing halt events — <code>on_error=halt</code> or <code>on_timeout=halt</code> triggered, job stopped.</p>
+</div>
+<div class="metric">
+  <div><span class="metric-name">changes_worker_eventing_v8_heap_used_bytes</span> <span class="metric-type badge-gauge">gauge</span></div>
+  <p class="metric-desc">V8 isolate heap used bytes (sampled every 100 invocations).</p>
+</div>
+<div class="metric">
+  <div><span class="metric-name">changes_worker_eventing_v8_heap_total_bytes</span> <span class="metric-type badge-gauge">gauge</span></div>
+  <p class="metric-desc">V8 isolate heap total bytes.</p>
+</div>
+<div class="metric">
+  <div><span class="metric-name">changes_worker_eventing_handler_duration_seconds</span> <span class="metric-type badge-summary">summary</span></div>
+  <p class="metric-desc">Time spent in JS handler per invocation (p50, p90, p99, _sum, _count).</p>
+</div>
+
+<!-- ================================================================ -->
+<!-- RECURSION GUARD -->
+<!-- ================================================================ -->
+<div id="recursion-guard" class="section-header">
+  <div class="section-icon counter">🔁</div>
+  <h2>Recursion Guard Metrics</h2>
+</div>
+
+<p style="color: var(--text-muted); margin-bottom: 1rem;">Write-back echo suppression — when the pipeline PUTs a document back to the source, the resulting <code>_changes</code> echo is detected and skipped to prevent infinite recursion loops.</p>
+
+<div class="metric">
+  <div><span class="metric-name">changes_worker_recursion_guard_suppressed_total</span> <span class="metric-type badge-counter">counter</span></div>
+  <p class="metric-desc">Changes suppressed by the recursion guard (write-back echo detected and skipped).</p>
+  <dl class="metric-detail">
+    <dt>PromQL — Suppression Rate</dt>
+    <dd><pre>rate(changes_worker_recursion_guard_suppressed_total[5m])</pre></dd>
+    <dt>PromQL — Suppression as % of Received</dt>
+    <dd><pre>rate(changes_worker_recursion_guard_suppressed_total[5m])
+  / rate(changes_worker_changes_received_total[5m]) * 100</pre></dd>
+  </dl>
 </div>
 
 <!-- ================================================================ -->

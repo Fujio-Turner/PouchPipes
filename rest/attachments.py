@@ -24,6 +24,7 @@ try:
 except ImportError:
     _json_loads = json.loads
 import re
+import time
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
@@ -119,8 +120,8 @@ class AttachmentProcessor:
         if src == "edge_server" and cfg.skip_on_edge_server:
             log_event(
                 logger,
-                "info",
-                "PROCESSING",
+                "debug",
+                "ATTACHMENT",
                 "skipping attachment processing for edge_server source",
                 doc_id=doc_id,
             )
@@ -132,12 +133,14 @@ class AttachmentProcessor:
         if not stubs:
             return doc, False
 
-        self._inc("attachments_detected_total", len(stubs))
+        t0 = time.monotonic()
+        detected_count = len(stubs)
+        self._inc("attachments_detected_total", detected_count)
         log_event(
             logger,
             "debug",
-            "PROCESSING",
-            "detected %d attachment(s)" % len(stubs),
+            "ATTACHMENT",
+            "detected %d attachment(s)" % detected_count,
             doc_id=doc_id,
         )
 
@@ -147,14 +150,14 @@ class AttachmentProcessor:
             log_event(
                 logger,
                 "debug",
-                "PROCESSING",
+                "ATTACHMENT",
                 "all attachments filtered out",
                 doc_id=doc_id,
             )
-            self._inc("attachments_skipped_total", len(stubs))
+            self._inc("attachments_skipped_total", detected_count)
             return doc, False
 
-        skipped_count = len(stubs) - len(filtered)
+        skipped_count = detected_count - len(filtered)
         if skipped_count:
             self._inc("attachments_skipped_total", skipped_count)
 
@@ -164,17 +167,26 @@ class AttachmentProcessor:
             log_event(
                 logger,
                 "info",
-                "PROCESSING",
+                "ATTACHMENT",
                 "dry_run: would fetch %d attachment(s), %d bytes total"
                 % (len(filtered), total_bytes),
                 doc_id=doc_id,
             )
             return doc, False
 
+        # -- Summary tracking --
+        fetched_count = 0
+        fetched_bytes = 0
+        uploaded_count = 0
+        uploaded_bytes = 0
+        dest_type = cfg.destination.type or "none"
+        post_action = cfg.post_process.action if self._post_processor else "none"
+        errors: list[str] = []
+
         # Streaming path — fetch+upload are fused (no in-memory buffer)
         if self._streamer:
             try:
-                uploaded = await self._fetch_and_upload_streaming(
+                uploaded_results = await self._fetch_and_upload_streaming(
                     doc_id, filtered, base_url, http, auth, headers, doc
                 )
             except AttachmentError:
@@ -185,30 +197,48 @@ class AttachmentProcessor:
                     raise AttachmentError(
                         "streaming transfer failed for doc %s: %s" % (doc_id, exc)
                     ) from exc
+                errors.append("stream: %s" % exc)
                 log_event(
                     logger,
                     "warn",
-                    "PROCESSING",
+                    "ATTACHMENT",
                     "streaming transfer error (continuing): %s" % exc,
                     doc_id=doc_id,
                 )
+                self._log_attachment_summary(
+                    doc_id,
+                    detected_count,
+                    skipped_count,
+                    len(filtered),
+                    0,
+                    0,
+                    0,
+                    0,
+                    dest_type,
+                    "none",
+                    errors,
+                    t0,
+                )
                 return doc, False
 
-            if uploaded:
+            if uploaded_results:
+                uploaded_count = len(uploaded_results)
+                uploaded_bytes = sum(r.length for r in uploaded_results.values())
+                fetched_count = uploaded_count  # streamed = fetched+uploaded fused
+                fetched_bytes = uploaded_bytes
                 log_event(
                     logger,
-                    "info",
-                    "PROCESSING",
-                    "streamed %d attachment(s) to %s"
-                    % (len(uploaded), cfg.destination.type),
+                    "debug",
+                    "ATTACHMENT",
+                    "streamed %d attachment(s) to %s" % (uploaded_count, dest_type),
                     doc_id=doc_id,
                 )
 
             # Phase 3 – post-process
-            if self._post_processor and uploaded:
+            if self._post_processor and uploaded_results:
                 try:
                     doc = await self._post_processor.post_process(
-                        doc, uploaded, base_url, http, auth, headers
+                        doc, uploaded_results, base_url, http, auth, headers
                     )
                 except AttachmentError:
                     raise
@@ -219,14 +249,29 @@ class AttachmentProcessor:
                             "attachment post-process failed for doc %s: %s"
                             % (doc_id, exc)
                         ) from exc
+                    errors.append("post-process: %s" % exc)
                     log_event(
                         logger,
                         "warn",
-                        "PROCESSING",
+                        "ATTACHMENT",
                         "attachment post-process error (continuing): %s" % exc,
                         doc_id=doc_id,
                     )
 
+            self._log_attachment_summary(
+                doc_id,
+                detected_count,
+                skipped_count,
+                len(filtered),
+                fetched_count,
+                fetched_bytes,
+                uploaded_count,
+                uploaded_bytes,
+                dest_type,
+                post_action,
+                errors,
+                t0,
+            )
             return doc, False
 
         # Phase 1: fetch
@@ -252,32 +297,50 @@ class AttachmentProcessor:
                 raise AttachmentError(
                     "attachment fetch failed for doc %s: %s" % (doc_id, exc)
                 ) from exc
+            errors.append("fetch: %s" % exc)
             log_event(
                 logger,
                 "warn",
-                "PROCESSING",
+                "ATTACHMENT",
                 "attachment fetch error (continuing): %s" % exc,
                 doc_id=doc_id,
+            )
+            self._log_attachment_summary(
+                doc_id,
+                detected_count,
+                skipped_count,
+                len(filtered),
+                0,
+                0,
+                0,
+                0,
+                dest_type,
+                "none",
+                errors,
+                t0,
             )
             return doc, False
 
         if fetched:
-            total_bytes = sum(len(v) for v in fetched.values())
-            self._inc("attachments_bytes_downloaded_total", total_bytes)
+            fetched_count = len(fetched)
+            fetched_bytes = sum(len(v) for v in fetched.values())
+            self._inc("attachments_bytes_downloaded_total", fetched_bytes)
             log_event(
                 logger,
-                "info",
-                "PROCESSING",
+                "debug",
+                "ATTACHMENT",
                 "fetched %d attachment(s), %d bytes total"
-                % (len(fetched), total_bytes),
+                % (fetched_count, fetched_bytes),
                 doc_id=doc_id,
             )
 
         # Phase 2 – upload fetched data to destination
-        uploaded: dict[str, AttachmentUploadResult] = {}
+        uploaded_results: dict[str, AttachmentUploadResult] = {}
         if self._uploader and fetched:
             try:
-                uploaded = await self._uploader.upload_many(doc, filtered, fetched)
+                uploaded_results = await self._uploader.upload_many(
+                    doc, filtered, fetched
+                )
             except AttachmentError:
                 raise
             except Exception as exc:
@@ -286,22 +349,38 @@ class AttachmentProcessor:
                     raise AttachmentError(
                         "attachment upload failed for doc %s: %s" % (doc_id, exc)
                     ) from exc
+                errors.append("upload: %s" % exc)
                 log_event(
                     logger,
                     "warn",
-                    "PROCESSING",
+                    "ATTACHMENT",
                     "attachment upload error (continuing): %s" % exc,
                     doc_id=doc_id,
                 )
+                self._log_attachment_summary(
+                    doc_id,
+                    detected_count,
+                    skipped_count,
+                    len(filtered),
+                    fetched_count,
+                    fetched_bytes,
+                    0,
+                    0,
+                    dest_type,
+                    "none",
+                    errors,
+                    t0,
+                )
                 return doc, False
 
-            if uploaded:
+            if uploaded_results:
+                uploaded_count = len(uploaded_results)
+                uploaded_bytes = sum(r.length for r in uploaded_results.values())
                 log_event(
                     logger,
-                    "info",
-                    "PROCESSING",
-                    "uploaded %d attachment(s) to %s"
-                    % (len(uploaded), cfg.destination.type),
+                    "debug",
+                    "ATTACHMENT",
+                    "uploaded %d attachment(s) to %s" % (uploaded_count, dest_type),
                     doc_id=doc_id,
                 )
 
@@ -309,7 +388,7 @@ class AttachmentProcessor:
         if self._post_processor and fetched:
             try:
                 doc = await self._post_processor.post_process(
-                    doc, uploaded, base_url, http, auth, headers
+                    doc, uploaded_results, base_url, http, auth, headers
                 )
             except AttachmentError:
                 raise
@@ -319,15 +398,72 @@ class AttachmentProcessor:
                     raise AttachmentError(
                         "attachment post-process failed for doc %s: %s" % (doc_id, exc)
                     ) from exc
+                errors.append("post-process: %s" % exc)
                 log_event(
                     logger,
                     "warn",
-                    "PROCESSING",
+                    "ATTACHMENT",
                     "attachment post-process error (continuing): %s" % exc,
                     doc_id=doc_id,
                 )
 
+        self._log_attachment_summary(
+            doc_id,
+            detected_count,
+            skipped_count,
+            len(filtered),
+            fetched_count,
+            fetched_bytes,
+            uploaded_count,
+            uploaded_bytes,
+            dest_type,
+            post_action,
+            errors,
+            t0,
+        )
         return doc, False
+
+    def _log_attachment_summary(
+        self,
+        doc_id: str,
+        detected: int,
+        skipped: int,
+        eligible: int,
+        fetched: int,
+        fetched_bytes: int,
+        uploaded: int,
+        uploaded_bytes: int,
+        dest_type: str,
+        post_action: str,
+        errors: list[str],
+        t0: float,
+    ) -> None:
+        """Emit consolidated per-doc attachment summary at INFO."""
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        log_event(
+            logger,
+            "info",
+            "ATTACHMENT",
+            "%d detected | %d fetched | %d uploaded to %s | post=%s | %.0fms%s"
+            % (
+                detected,
+                fetched,
+                uploaded,
+                dest_type,
+                post_action,
+                elapsed_ms,
+                " | %d error(s)" % len(errors) if errors else "",
+            ),
+            doc_id=doc_id,
+            batch_size=detected,
+            filtered_count=skipped if skipped else None,
+            docs_fetched=fetched,
+            bytes=fetched_bytes if fetched_bytes else None,
+            mode=dest_type,
+            operation=post_action if post_action != "none" else None,
+            failed=len(errors) if errors else None,
+            duration_ms=round(elapsed_ms, 1),
+        )
 
     async def close(self) -> None:
         """Release resources held by the uploader / streamer."""
@@ -404,7 +540,7 @@ class AttachmentProcessor:
                             log_event(
                                 logger,
                                 "warn",
-                                "PROCESSING",
+                                "ATTACHMENT",
                                 "attachment not found (skipping): %s" % name,
                                 doc_id=doc_id,
                             )
@@ -413,7 +549,7 @@ class AttachmentProcessor:
                     log_event(
                         logger,
                         "warn",
-                        "PROCESSING",
+                        "ATTACHMENT",
                         "streaming transfer error: %s – %s" % (name, exc),
                         doc_id=doc_id,
                     )
@@ -434,7 +570,7 @@ class AttachmentProcessor:
             log_event(
                 logger,
                 "warn",
-                "PROCESSING",
+                "ATTACHMENT",
                 "%d attachment(s) failed to stream" % len(errors),
                 doc_id=doc_id,
             )
@@ -483,7 +619,7 @@ class AttachmentProcessor:
             log_event(
                 logger,
                 "warn",
-                "PROCESSING",
+                "ATTACHMENT",
                 "bulk_get error (continuing): %s" % exc,
                 doc_id=doc_id,
             )
@@ -500,7 +636,7 @@ class AttachmentProcessor:
             log_event(
                 logger,
                 "warn",
-                "PROCESSING",
+                "ATTACHMENT",
                 "bulk_get response parse error (continuing): %s" % exc,
                 doc_id=doc_id,
             )
@@ -522,7 +658,7 @@ class AttachmentProcessor:
             msg = "bulk_get returned error for doc %s: %s" % (doc_id, err)
             if self._config.halt_on_failure:
                 raise AttachmentError(msg)
-            log_event(logger, "warn", "PROCESSING", msg, doc_id=doc_id)
+            log_event(logger, "warn", "ATTACHMENT", msg, doc_id=doc_id)
             return results
 
         ok_doc = inner.get("ok", {})
@@ -538,7 +674,7 @@ class AttachmentProcessor:
                 log_event(
                     logger,
                     "warn",
-                    "PROCESSING",
+                    "ATTACHMENT",
                     "bulk_get: missing data for attachment %s" % name,
                     doc_id=doc_id,
                 )
@@ -552,7 +688,7 @@ class AttachmentProcessor:
                 log_event(
                     logger,
                     "warn",
-                    "PROCESSING",
+                    "ATTACHMENT",
                     "bulk_get: base64 decode error for %s: %s" % (name, exc),
                     doc_id=doc_id,
                 )
@@ -569,7 +705,7 @@ class AttachmentProcessor:
                     log_event(
                         logger,
                         "warn",
-                        "PROCESSING",
+                        "ATTACHMENT",
                         "attachment length mismatch: %s expected=%d got=%d"
                         % (name, expected_len, len(data)),
                         doc_id=doc_id,
@@ -586,7 +722,7 @@ class AttachmentProcessor:
                     log_event(
                         logger,
                         "warn",
-                        "PROCESSING",
+                        "ATTACHMENT",
                         "attachment digest mismatch: %s digest=%s" % (name, digest_str),
                         doc_id=doc_id,
                     )
@@ -606,7 +742,7 @@ class AttachmentProcessor:
             log_event(
                 logger,
                 "warn",
-                "PROCESSING",
+                "ATTACHMENT",
                 "%d attachment(s) failed in bulk_get" % len(errors),
                 doc_id=doc_id,
             )
@@ -668,7 +804,7 @@ class AttachmentProcessor:
                     log_event(
                         logger,
                         "warn",
-                        "PROCESSING",
+                        "ATTACHMENT",
                         "attachment length mismatch: %s expected=%d got=%d"
                         % (name, expected_len, len(data)),
                         doc_id=doc_id,
@@ -684,7 +820,7 @@ class AttachmentProcessor:
                     log_event(
                         logger,
                         "warn",
-                        "PROCESSING",
+                        "ATTACHMENT",
                         "attachment digest mismatch: %s digest=%s" % (name, digest_str),
                         doc_id=doc_id,
                     )
@@ -704,7 +840,7 @@ class AttachmentProcessor:
             log_event(
                 logger,
                 "warn",
-                "PROCESSING",
+                "ATTACHMENT",
                 "%d attachment(s) failed verification" % len(errors),
                 doc_id=doc_id,
             )
@@ -735,7 +871,7 @@ class AttachmentProcessor:
                 log_event(
                     logger,
                     "debug",
-                    "PROCESSING",
+                    "ATTACHMENT",
                     "total attachment size %d exceeds max_total_bytes_per_doc %d"
                     % (total, cfg.max_total_bytes_per_doc),
                     doc_id=doc_id,
@@ -819,7 +955,7 @@ class AttachmentProcessor:
                             log_event(
                                 logger,
                                 "warn",
-                                "PROCESSING",
+                                "ATTACHMENT",
                                 "attachment not found (skipping): %s" % name,
                                 doc_id=doc_id,
                             )
@@ -832,7 +968,7 @@ class AttachmentProcessor:
                     log_event(
                         logger,
                         "warn",
-                        "PROCESSING",
+                        "ATTACHMENT",
                         "attachment download error: %s – %s" % (name, exc),
                         doc_id=doc_id,
                     )
@@ -847,7 +983,7 @@ class AttachmentProcessor:
                         log_event(
                             logger,
                             "warn",
-                            "PROCESSING",
+                            "ATTACHMENT",
                             "attachment length mismatch: %s expected=%d got=%d"
                             % (name, expected_len, len(data)),
                             doc_id=doc_id,
@@ -864,7 +1000,7 @@ class AttachmentProcessor:
                         log_event(
                             logger,
                             "warn",
-                            "PROCESSING",
+                            "ATTACHMENT",
                             "attachment digest mismatch: %s digest=%s"
                             % (name, digest_str),
                             doc_id=doc_id,
@@ -888,7 +1024,7 @@ class AttachmentProcessor:
             log_event(
                 logger,
                 "warn",
-                "PROCESSING",
+                "ATTACHMENT",
                 "%d attachment(s) failed to download" % len(errors),
                 doc_id=doc_id,
             )

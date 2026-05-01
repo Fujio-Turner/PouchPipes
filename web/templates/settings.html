@@ -2341,41 +2341,7 @@
 
   // Collect form values into config object
   function collectConfig() {
-    var channels = channelsTagify.value.map(function(t) { return t.value; });
-
     return {
-      gateway: {
-        src: document.getElementById('gateway_src').value,
-        url: document.getElementById('gateway_url').value,
-        database: document.getElementById('gateway_database').value,
-        scope: document.getElementById('gateway_scope').value,
-        collection: document.getElementById('gateway_collection').value,
-        accept_self_signed_certs: document.getElementById('gateway_accept_self_signed_certs').checked,
-        compress: document.getElementById('gateway_compress').checked
-      },
-      auth: {
-        method: document.getElementById('auth_method').value,
-        username: document.getElementById('auth_username').value,
-        password: document.getElementById('auth_password').value,
-        session_cookie: document.getElementById('auth_session_cookie').value,
-        bearer_token: document.getElementById('auth_bearer_token').value
-      },
-      changes_feed: {
-        feed_type: document.getElementById('changes_feed_feed_type').value,
-        poll_interval_seconds: parseInt(document.getElementById('changes_feed_poll_interval_seconds').value) || 0,
-        active_only: document.getElementById('changes_feed_active_only').checked,
-        include_docs: document.getElementById('changes_feed_include_docs').checked,
-        channels: channels,
-        since: document.getElementById('changes_feed_since').value || '0',
-        limit: parseInt(document.getElementById('changes_feed_limit').value) || 0,
-        throttle_feed: parseInt(document.getElementById('changes_feed_throttle_feed').value) || 0,
-        flood_threshold: parseInt(document.getElementById('changes_feed_flood_threshold').value) || 10000,
-        heartbeat_ms: parseInt(document.getElementById('changes_feed_heartbeat_ms').value) || 30000,
-        timeout_ms: parseInt(document.getElementById('changes_feed_timeout_ms').value) || 60000,
-        http_timeout_seconds: parseInt(document.getElementById('changes_feed_http_timeout_seconds').value) || 300,
-        optimize_initial_sync: document.getElementById('changes_feed_optimize_initial_sync').checked,
-        continuous_catchup_limit: parseInt(document.getElementById('changes_feed_continuous_catchup_limit').value) || 10000
-      },
       threads: parseInt(document.getElementById('threads').value) || 4,
       processing: {
         ignore_delete: document.getElementById('processing_ignore_delete').checked,
@@ -2459,123 +2425,6 @@
         halt_on_failure: document.getElementById('attach_halt_on_failure').checked,
         skip_on_edge_server: document.getElementById('attach_skip_edge').checked
       },
-      output: (function() {
-        var mode = document.getElementById('output_mode').value;
-        var o = {
-          mode: mode,
-          halt_on_failure: document.getElementById('output_halt_on_failure').checked,
-          data_error_action: document.getElementById('output_data_error_action').value,
-          dead_letter_path: document.getElementById('output_dead_letter_path').value,
-          dlq: {
-            retention_seconds: parseInt(document.getElementById('output_dlq_retention_seconds').value) || 0,
-            max_replay_attempts: parseInt(document.getElementById('output_dlq_max_replay_attempts').value) || 0
-          }
-        };
-        if (mode === 'http') {
-          o.target_url = document.getElementById('output_target_url').value;
-          o.url_template = document.getElementById('output_url_template').value || '{target_url}/{doc_id}';
-          o.output_format = document.getElementById('output_output_format').value;
-          o.write_method = document.getElementById('output_write_method').value;
-          o.delete_method = document.getElementById('output_delete_method').value;
-          o.send_delete_body = document.getElementById('output_send_delete_body').checked;
-          o.request_timeout_seconds = parseInt(document.getElementById('output_request_timeout').value) || 30;
-          o.accept_self_signed_certs = document.getElementById('output_accept_self_signed_certs').checked;
-          o.follow_redirects = document.getElementById('output_follow_redirects').checked;
-          o.target_auth = {
-            method: document.getElementById('output_target_auth_method').value,
-            username: document.getElementById('output_target_auth_username').value,
-            password: document.getElementById('output_target_auth_password').value,
-            session_cookie: document.getElementById('output_target_auth_session_cookie').value,
-            bearer_token: document.getElementById('output_target_auth_bearer_token').value
-          };
-          o.request_options = {
-            headers: (function() { try { return JSON.parse(document.getElementById('output_request_headers').value || '{}'); } catch(e) { return {}; } })(),
-            params: (function() { try { return JSON.parse(document.getElementById('output_request_params').value || '{}'); } catch(e) { return {}; } })()
-          };
-          o.retry = {
-            max_retries: parseInt(document.getElementById('output_retry_max_retries').value) || 3,
-            backoff_base_seconds: parseFloat(document.getElementById('output_retry_backoff_base').value) || 1,
-            backoff_max_seconds: parseInt(document.getElementById('output_retry_backoff_max').value) || 30,
-            retry_on_status: (document.getElementById('output_retry_on_status').value || '500,502,503,504').split(',').map(function(s) { return parseInt(s.trim()); }).filter(function(n) { return !isNaN(n); })
-          };
-          o.log_response_times = document.getElementById('output_log_response_times').checked;
-          o.health_check = {
-            enabled: document.getElementById('output_hc_enabled').checked,
-            interval_seconds: parseInt(document.getElementById('output_hc_interval').value) || 30,
-            timeout_seconds: parseInt(document.getElementById('output_hc_timeout').value) || 5,
-            url: document.getElementById('output_hc_url').value,
-            method: document.getElementById('output_hc_method').value
-          };
-        }
-        if (mode === 'db') {
-          var mappingMode = document.getElementById('output_db_mapping_mode').value;
-          var dbCfg = {
-            engine: document.getElementById('output_db_engine').value,
-            host: document.getElementById('output_db_host').value,
-            port: parseInt(document.getElementById('output_db_port').value) || null,
-            database: document.getElementById('output_db_database').value,
-            username: document.getElementById('output_db_username').value,
-            password: document.getElementById('output_db_password').value,
-            schema: document.getElementById('output_db_schema').value,
-            table: document.getElementById('output_db_table').value,
-            ssl: document.getElementById('output_db_ssl').checked,
-            pool_size: parseInt(document.getElementById('output_db_pool_size').value) || 5,
-            connect_timeout_seconds: parseInt(document.getElementById('output_db_connect_timeout').value) || 10,
-            mapping: { mode: mappingMode }
-          };
-          if (mappingMode === 'jsonb') {
-            dbCfg.mapping.doc_id_column = document.getElementById('output_db_doc_id_column').value || 'doc_id';
-            dbCfg.mapping.rev_column = document.getElementById('output_db_rev_column').value || 'rev';
-            dbCfg.mapping.body_column = document.getElementById('output_db_body_column').value || 'body';
-            dbCfg.mapping.timestamp_column = document.getElementById('output_db_timestamp_column').value || 'updated_at';
-          }
-          if (mappingMode === 'columns') {
-            dbCfg.schema_mappings = {
-              enabled: document.getElementById('output_db_schema_mappings_enabled').checked,
-              path: document.getElementById('output_db_schema_mappings_path').value || 'mappings/',
-              default_mode: document.getElementById('output_db_schema_mappings_default_mode').value,
-              strict: document.getElementById('output_db_schema_mappings_strict').checked
-            };
-            // Data validation config (available for columns mode)
-            dbCfg.validation = {
-              enabled: document.getElementById('output_db_validation_enabled').checked,
-              strict: document.getElementById('output_db_validation_strict').checked,
-              track_originals: document.getElementById('output_db_validation_track_originals').checked,
-              dlq_on_error: document.getElementById('output_db_validation_dlq_on_error').checked
-            };
-          }
-          o.db = dbCfg;
-        }
-        if (mode === 's3') {
-          o.s3 = {
-            bucket: document.getElementById('output_s3_bucket').value,
-            region: document.getElementById('output_s3_region').value || 'us-east-1',
-            endpoint_url: document.getElementById('output_s3_endpoint_url').value,
-            access_key_id: document.getElementById('output_s3_access_key_id').value,
-            secret_access_key: document.getElementById('output_s3_secret_access_key').value,
-            session_token: document.getElementById('output_s3_session_token').value,
-            key_prefix: document.getElementById('output_s3_key_prefix').value || 'couchdb-changes',
-            key_template: document.getElementById('output_s3_key_template').value || '{prefix}/{doc_id}.json',
-            key_sanitize: document.getElementById('output_s3_key_sanitize').checked,
-            content_type: document.getElementById('output_s3_content_type').value || 'application/json',
-            storage_class: document.getElementById('output_s3_storage_class').value,
-            server_side_encryption: document.getElementById('output_s3_sse').value,
-            kms_key_id: document.getElementById('output_s3_kms_key_id').value,
-            metadata: (function() { try { return JSON.parse(document.getElementById('output_s3_metadata').value || '{}'); } catch(e) { return {}; } })(),
-            on_delete: document.getElementById('output_s3_on_delete').value,
-            batch: {
-              enabled: document.getElementById('output_s3_batch_enabled').checked,
-              max_docs: parseInt(document.getElementById('output_s3_batch_max_docs').value) || 100,
-              max_bytes: parseInt(document.getElementById('output_s3_batch_max_bytes').value) || 1048576,
-              max_seconds: parseFloat(document.getElementById('output_s3_batch_max_seconds').value) || 5
-            },
-            max_retries: parseInt(document.getElementById('output_s3_max_retries').value) || 3,
-            backoff_base_seconds: parseFloat(document.getElementById('output_s3_backoff_base').value) || 0.5,
-            backoff_max_seconds: parseInt(document.getElementById('output_s3_backoff_max').value) || 10
-          };
-        }
-        return o;
-      })(),
       couchbase_lite: {
         db_dir: document.getElementById('cbl_db_dir').value,
         db_name: document.getElementById('cbl_db_name').value,
@@ -2654,8 +2503,9 @@
     clearValidationHighlights();
     var invalidFields = [];
     document.querySelectorAll('#viewForm input.validator, #viewForm select.validator, #viewForm textarea.validator').forEach(function(el) {
-      // Skip inputs inside hidden parent containers
+      // Skip inputs inside hidden parent containers or display:none tabs
       if (el.closest('.hidden')) return;
+      if (el.closest('[style*="display:none"], [style*="display: none"]')) return;
       if (!el.checkValidity()) {
         invalidFields.push(el);
       }
@@ -2802,9 +2652,22 @@
       });
       var data = await res.json();
       if (data.error) {
-        showToast(data.detail || data.error, 'error');
+        // Rich failure: short toast + detailed alert with URL + log pointer
+        var msg = '✗ ' + data.error;
+        if (data.status) msg += ' [HTTP ' + data.status + ']';
+        showToast(msg, 'error');
+        alert('✕ Source test failed' +
+              (data.elapsed_ms ? ' (' + data.elapsed_ms + 'ms)' : '') +
+              '\n\nURL: ' + (data.url || '?') +
+              (data.status ? ('\nHTTP Status: ' + data.status) : '') +
+              (data.error_class ? ('\nError Class: ' + data.error_class) : '') +
+              '\nError: ' + data.error +
+              (data.detail && data.detail !== data.error ? ('\n\nDetail: ' + data.detail) : '') +
+              (data.hint ? ('\n\n💡 Hint: ' + data.hint) : '') +
+              '\n\nSee the Logs page (filter [CONTROL]/[HTTP], search "test-source") for the full audit trail.');
+        console.warn('[test-source failed]', data);
       } else {
-        showToast('✓ Connected! Got ' + (data.pool_size || 1) + ' docs', 'success');
+        showToast('✓ Connected! Got ' + (data.pool_size || 1) + ' docs (' + (data.elapsed_ms || '?') + 'ms)', 'success');
       }
       status.textContent = '';
     } catch (e) {

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+from email.utils import parsedate_to_datetime
 
 import json
 
@@ -34,8 +35,14 @@ try:
 except ImportError:  # pragma: no cover
     ic = lambda *a, **kw: None  # noqa: E731
 
-from pipeline.pipeline_logging import log_event, infer_operation
+from pipeline.pipeline_logging import (
+    log_event,
+    infer_operation,
+    generate_batch_id,
+    set_batch_id,
+)
 from rest import OutputForwarder, OutputEndpointDown, DeadLetterQueue, determine_method
+from rest.output_http import classify_http_status, _TRANSIENT_4XX, _TRANSIENT_5XX
 
 logger = logging.getLogger("changes_worker")
 
@@ -56,7 +63,7 @@ class RetryableHTTP:
         self._backoff_base = retry_cfg.get("backoff_base_seconds", 1)
         self._backoff_max = retry_cfg.get("backoff_max_seconds", 60)
         self._retry_statuses = set(
-            retry_cfg.get("retry_on_status", [500, 502, 503, 504])
+            retry_cfg.get("retry_on_status", [500, 502, 503, 504, 507])
         )
         self._metrics = None
         self._shutdown_event: asyncio.Event | None = None
@@ -66,6 +73,28 @@ class RetryableHTTP:
 
     def set_shutdown_event(self, event: asyncio.Event) -> None:
         self._shutdown_event = event
+
+    @staticmethod
+    def _parse_retry_after(value: str | None) -> float | None:
+        """Parse a Retry-After header value (integer seconds or HTTP-date)."""
+        if not value:
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            pass
+        try:
+            dt = parsedate_to_datetime(value)
+            delta = (dt - dt.now(dt.tzinfo)).total_seconds()
+            return max(delta, 0)
+        except Exception:
+            log_event(
+                logger,
+                "debug",
+                "RETRY",
+                "could not parse Retry-After header: %s" % value,
+            )
+            return None
 
     async def request(self, method: str, url: str, **kwargs) -> aiohttp.ClientResponse:
         shutdown = kwargs.pop("shutdown_event", None) or self._shutdown_event
@@ -91,7 +120,12 @@ class RetryableHTTP:
                 if resp.status < 300:
                     return resp
                 body = await resp.text()
-                if resp.status in self._retry_statuses:
+
+                # Classify the status code
+                error_class, is_transient = classify_http_status(resp.status)
+
+                # Retryable: explicit retry_on_status list OR transient 4xx/5xx
+                if resp.status in self._retry_statuses or is_transient:
                     log_event(
                         logger,
                         "warn",
@@ -100,22 +134,49 @@ class RetryableHTTP:
                         http_method=method,
                         url=url,
                         status=resp.status,
+                        error_class=error_class,
                         attempt=attempt,
                     )
+                    # §3.7: Respect Retry-After header on 429 responses
+                    if resp.status == 429:
+                        retry_after_delay = self._parse_retry_after(
+                            resp.headers.get("Retry-After")
+                        )
+                        if retry_after_delay is not None and self._metrics:
+                            self._metrics.inc("rate_limit_retry_after_total")
+                    else:
+                        retry_after_delay = None
                     resp.release()
                     if self._metrics:
                         self._metrics.inc("retries_total")
-                elif 400 <= resp.status < 500:
-                    log_event(
-                        logger,
-                        "error",
-                        "HTTP",
-                        "client error",
-                        http_method=method,
-                        url=url,
-                        status=resp.status,
-                    )
-                    raise ClientHTTPError(resp.status, body)
+                    # Apply Retry-After delay if present (overrides normal backoff)
+                    if retry_after_delay is not None and attempt < self._max_retries:
+                        delay = max(
+                            retry_after_delay,
+                            min(
+                                self._backoff_base * (2 ** (attempt - 1)),
+                                self._backoff_max,
+                            ),
+                        )
+                        log_event(
+                            logger,
+                            "info",
+                            "RETRY",
+                            "respecting Retry-After header",
+                            delay_seconds=delay,
+                            attempt=attempt,
+                        )
+                        if shutdown:
+                            try:
+                                await asyncio.wait_for(shutdown.wait(), timeout=delay)
+                                raise ShutdownRequested(
+                                    f"Shutdown during Retry-After backoff for {method} {url}"
+                                )
+                            except asyncio.TimeoutError:
+                                pass
+                        else:
+                            await asyncio.sleep(delay)
+                        continue
                 elif 300 <= resp.status < 400:
                     log_event(
                         logger,
@@ -127,7 +188,31 @@ class RetryableHTTP:
                         status=resp.status,
                     )
                     raise RedirectHTTPError(resp.status, body)
+                elif 400 <= resp.status < 500:
+                    # Permanent 4xx — no retry, raise immediately
+                    log_event(
+                        logger,
+                        "error",
+                        "HTTP",
+                        "client error (permanent)",
+                        http_method=method,
+                        url=url,
+                        status=resp.status,
+                        error_class=error_class,
+                    )
+                    raise ClientHTTPError(resp.status, body)
                 else:
+                    # Permanent 5xx (501, 505, etc.) — no retry
+                    log_event(
+                        logger,
+                        "error",
+                        "HTTP",
+                        "server error (permanent)",
+                        http_method=method,
+                        url=url,
+                        status=resp.status,
+                        error_class=error_class,
+                    )
                     raise ServerHTTPError(resp.status, body)
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 log_event(
@@ -294,7 +379,7 @@ async def fetch_docs(
     batches = _chunked(eligible, batch_size)
     log_event(
         logger,
-        "info",
+        "debug",
         "HTTP",
         "fetching %d docs in %d batch(es)" % (len(eligible), len(batches)),
         batch_size=batch_size,
@@ -431,7 +516,7 @@ async def _fetch_docs_bulk_get(
     requested_count = len(docs_req)
     log_event(
         logger,
-        "info",
+        "debug",
         "HTTP",
         "_bulk_get: requesting %d docs" % requested_count,
         doc_count=requested_count,
@@ -468,10 +553,13 @@ async def _fetch_docs_bulk_get(
         try:
             body = _json_loads(raw_bytes)
         except (json.JSONDecodeError, ValueError) as exc:
-            logger.warning(
-                "bulk_get: malformed JSON response (%d bytes): %s",
-                len(raw_bytes),
-                exc,
+            log_event(
+                logger,
+                "warn",
+                "HTTP",
+                "bulk_get: malformed JSON response",
+                response_bytes=len(raw_bytes),
+                error_detail=str(exc),
             )
             if metrics:
                 metrics.inc("doc_fetch_errors_total")
@@ -501,7 +589,7 @@ async def _fetch_docs_bulk_get(
 
     log_event(
         logger,
-        "info",
+        "debug",
         "HTTP",
         "_bulk_get: received %d docs" % len(results),
         doc_count=len(results),
@@ -649,18 +737,32 @@ async def _fetch_docs_individually(
             except ClientHTTPError as exc:
                 if exc.status in (401, 403):
                     raise  # auth errors are non-retryable
-                logger.warning("Failed to fetch doc %s: HTTP %d", doc_id, exc.status)
+                log_event(
+                    logger,
+                    "warn",
+                    "HTTP",
+                    "failed to fetch doc",
+                    doc_id=doc_id,
+                    status=exc.status,
+                )
                 if metrics:
                     metrics.inc("doc_fetch_errors_total")
             except Exception as exc:
-                logger.warning("Failed to fetch doc %s: %s", doc_id, exc)
+                log_event(
+                    logger,
+                    "warn",
+                    "HTTP",
+                    "failed to fetch doc",
+                    doc_id=doc_id,
+                    error_detail=str(exc),
+                )
                 if metrics:
                     metrics.inc("doc_fetch_errors_total")
 
     tasks = [asyncio.create_task(_get_one(r)) for r in rows]
     log_event(
         logger,
-        "info",
+        "debug",
         "HTTP",
         "fetching %d docs individually" % len(tasks),
         doc_count=len(tasks),
@@ -740,9 +842,9 @@ async def fetch_db_update_seq(
                     logger,
                     "debug",
                     "CHANGES",
-                    "extracted update_seq from Edge Server collections",
+                    "extracted update_seq from Edge Server collections (%d)"
+                    % len(collections),
                     url=url,
-                    collection_count=len(collections),
                 )
         if raw_seq is None:
             log_event(
@@ -760,7 +862,6 @@ async def fetch_db_update_seq(
             "CHANGES",
             "fetched database update_seq=%d as initial sync target" % seq_int,
             url=url,
-            update_seq=seq_int,
         )
         return seq_int
     except Exception as exc:
@@ -830,13 +931,30 @@ def _build_changes_body(
 
 
 async def _sleep_with_backoff(
-    retry_cfg: dict, failure_count: int, shutdown_event: asyncio.Event
+    retry_cfg: dict,
+    failure_count: int,
+    shutdown_event: asyncio.Event,
+    *,
+    output_down: bool = False,
 ) -> None:
-    """Exponential backoff sleep using retry config."""
+    """Exponential backoff sleep using retry config.
+
+    When *output_down* is True the cap is raised to 300 s (5 min) so that
+    the feed loop doesn't spin-reconnect while the output target is down.
+    """
     base = retry_cfg.get("backoff_base_seconds", 1)
     max_s = retry_cfg.get("backoff_max_seconds", 60)
+    if output_down:
+        max_s = max(max_s, 300)
     delay = min(base * (2 ** (failure_count - 1)), max_s)
-    logger.info("Backing off %.1fs before retry (failure #%d)", delay, failure_count)
+    label = "output-down backoff" if output_down else "backoff"
+    log_event(
+        logger,
+        "warn",
+        "RETRY",
+        "%s %.1fs before retry" % (label, delay),
+        attempt=failure_count,
+    )
     await _sleep_or_shutdown(delay, shutdown_event)
 
 
@@ -863,6 +981,8 @@ async def _process_changes_batch(
     initial_sync: bool = False,
     job_id: str = "",
     attachment_processor=None,
+    eventing_handler=None,
+    recursion_guard=None,
 ) -> tuple[str, bool]:
     """
     Process a batch of _changes results: filter, fetch docs, forward to output,
@@ -873,6 +993,10 @@ async def _process_changes_batch(
     out regardless of the ``ignore_delete``/``ignore_remove`` config.
     """
     batch_t0 = time.monotonic()
+    # Assign a 6-char tracing ID to this batch — every log_event in this
+    # async context will automatically include it (via contextvars).
+    _batch_id_token = set_batch_id(generate_batch_id())
+
     sequential = proc_cfg.get("sequential", False)
     include_docs = feed_cfg.get("include_docs", False)
     ignore_delete = proc_cfg.get("ignore_delete", False)
@@ -912,7 +1036,7 @@ async def _process_changes_batch(
 
     log_event(
         logger,
-        "info",
+        "debug",
         "CHANGES",
         "_changes batch: %d changes" % len(results),
         batch_size=len(results),
@@ -990,7 +1114,7 @@ async def _process_changes_batch(
         rem_fwd = feed_removes - removed_count
         log_event(
             logger,
-            "info",
+            "debug",
             "CHANGES",
             "tombstones in batch: %d deleted + %d removed "
             "(forwarded=%d, filtered=%d)"
@@ -1025,11 +1149,14 @@ async def _process_changes_batch(
     # doesn't waste bandwidth on docs we'll never process.
     docs_by_id: dict[str, dict] = {}
     need_fetch = not feed_cfg.get("include_docs") and filtered
+    docs_requested = 0
+    docs_fetched_count = 0
     if need_fetch and not sequential:
         fetch_rows = [
             r for r in filtered if not r.get("deleted") and not r.get("removed")
         ]
         if fetch_rows:
+            docs_requested = len(fetch_rows)
             batch_size = proc_cfg.get("get_batch_number", 100)
             fetched = await fetch_docs(
                 http,
@@ -1042,15 +1169,17 @@ async def _process_changes_batch(
                 batch_size,
                 metrics=metrics,
             )
+            docs_fetched_count = len(fetched)
             for doc in fetched:
                 docs_by_id[doc.get("_id", "")] = doc
             if metrics:
-                metrics.inc("docs_fetched_total", len(fetched))
+                metrics.inc("docs_fetched_total", docs_fetched_count)
 
     # Process changes – send each doc to the output
     output_failed = False
     batch_success = 0
     batch_fail = 0
+    batch_out_ms = 0.0  # accumulated output-side wall-clock time
 
     async def _resolve_doc(change: dict) -> dict:
         """Resolve the full document body for a change row.
@@ -1128,6 +1257,79 @@ async def _process_changes_batch(
                     "_change": change,
                     "_doc": {"_id": doc_id},
                 }
+            # ── RECURSION GUARD (suppress own write-back echoes) ──
+            if recursion_guard is not None:
+                doc_rev = doc.get("_rev", "") if isinstance(doc, dict) else ""
+                if recursion_guard.is_echo(doc_id, doc_rev):
+                    if metrics:
+                        metrics.inc("recursion_guard_suppressed_total")
+                    return {
+                        "ok": True,
+                        "doc_id": doc_id,
+                        "status": 0,
+                        "skipped": True,
+                        "recursion_suppressed": True,
+                        "_change": change,
+                        "_doc": doc,
+                    }
+            # ── EVENTING stage (after _changes, before Schema Mapper) ──
+            if eventing_handler is not None:
+                from eventing.eventing import EventingHalt
+
+                change_for_eventing = dict(change)
+                change_for_eventing["doc"] = doc
+                try:
+                    eventing_result = eventing_handler.process_change(
+                        change_for_eventing
+                    )
+                except EventingHalt as halt_exc:
+                    log_event(
+                        logger,
+                        "error",
+                        "EVENTING",
+                        "JS halt in eventing — stopping pipeline",
+                        doc_id=doc_id,
+                    )
+                    raise
+                except Exception as ev_exc:
+                    log_event(
+                        logger,
+                        "error",
+                        "EVENTING",
+                        "JS error in eventing",
+                        doc_id=doc_id,
+                    )
+                    if metrics:
+                        metrics.inc("eventing_errors_total")
+                    return {
+                        "ok": False,
+                        "doc_id": doc_id,
+                        "status": 0,
+                        "error": "eventing: %s" % ev_exc,
+                        "error_class": "eventing",
+                        "retryable": False,
+                        "_change": change,
+                        "_doc": doc,
+                    }
+                if eventing_result is None:
+                    log_event(
+                        logger,
+                        "debug",
+                        "EVENTING",
+                        "document rejected by eventing handler",
+                        doc_id=doc_id,
+                    )
+                    return {
+                        "ok": True,
+                        "doc_id": doc_id,
+                        "status": 0,
+                        "skipped": True,
+                        "eventing_rejected": True,
+                        "_change": change,
+                        "_doc": doc,
+                    }
+                doc = eventing_result
+
             # ── ATTACHMENT stage (between MIDDLE and RIGHT) ──
             if has_attachments:
                 try:
@@ -1138,11 +1340,23 @@ async def _process_changes_batch(
                     log_event(
                         logger,
                         "error",
-                        "PROCESSING",
-                        "attachment processing failed: %s" % att_exc,
+                        "ATTACHMENT",
+                        "attachment processing failed: %s: %s"
+                        % (type(att_exc).__name__, att_exc),
                         doc_id=doc_id,
                     )
-                    raise
+                    if metrics:
+                        metrics.inc("attachment_errors_total")
+                    return {
+                        "ok": False,
+                        "doc_id": doc_id,
+                        "status": 0,
+                        "error": "attachment: %s" % att_exc,
+                        "error_class": "attachment",
+                        "retryable": False,
+                        "_change": change,
+                        "_doc": doc,
+                    }
 
             method = (
                 delete_method
@@ -1161,13 +1375,13 @@ async def _process_changes_batch(
                     mode=output._mode,
                     http_method=method,
                 )
+            _out_t0 = time.monotonic()
             result = await output.send(doc, method)
-            # Parallel mode needs _change/_doc on the result dict because
-            # the caller only sees results after asyncio.wait(); sequential
-            # mode already has the loop variables in scope.
-            if not sequential:
-                result["_change"] = change
-                result["_doc"] = doc
+            result["_out_ms"] = (time.monotonic() - _out_t0) * 1000
+            # Always attach _change/_doc so the DLQ can store the full
+            # document for replay regardless of sequential/parallel mode.
+            result["_change"] = change
+            result["_doc"] = doc
             if result.get("ok"):
                 if log_trace:
                     log_event(
@@ -1204,6 +1418,7 @@ async def _process_changes_batch(
             for change in sub_batch:
                 try:
                     result = await process_one(change)
+                    batch_out_ms += result.get("_out_ms", 0)
                     if result.get("ok"):
                         batch_success += 1
                     else:
@@ -1299,6 +1514,7 @@ async def _process_changes_batch(
             if sequential:
                 for idx, change in enumerate(filtered):
                     result = await process_one(change)
+                    batch_out_ms += result.get("_out_ms", 0)
                     if result.get("skipped"):
                         batch_success += 1
                     elif result.get("ok"):
@@ -1341,10 +1557,22 @@ async def _process_changes_batch(
             else:
                 tasks = [asyncio.create_task(process_one(c)) for c in filtered]
                 done, _ = await asyncio.wait(tasks)
+                # Collect the first OutputEndpointDown if any, and consume
+                # all other task exceptions to avoid "exception never retrieved".
+                first_exc = None
+                results = []
                 for t in done:
-                    if t.exception():
-                        raise t.exception()
-                    result = t.result()
+                    exc = t.exception()
+                    if exc is not None:
+                        if first_exc is None:
+                            first_exc = exc
+                        # Exception consumed — no "never retrieved" warning
+                        continue
+                    results.append(t.result())
+                if first_exc is not None:
+                    raise first_exc
+                for result in results:
+                    batch_out_ms += result.get("_out_ms", 0)
                     if result.get("ok"):
                         batch_success += 1
                     else:
@@ -1431,9 +1659,10 @@ async def _process_changes_batch(
 
     total = batch_success + batch_fail
     if total > 0:
+        level = "info" if batch_fail else "debug"
         log_event(
             logger,
-            "info",
+            level,
             "PROCESSING",
             "batch complete: %d/%d succeeded, %d failed%s"
             % (
@@ -1453,38 +1682,63 @@ async def _process_changes_batch(
         if metrics:
             metrics.set("dlq_pending_count", dlq.pending_count())
 
-    output.log_stats()
+    output.log_stats(force_info=batch_fail > 0)
 
     if output_failed:
         if metrics:
             metrics.record_batch_processing_time(time.monotonic() - batch_t0)
             metrics.inc("batches_total")
             metrics.inc("batches_failed_total")
-        return since, True
 
-    if not sequential:
-        # Parallel mode: single checkpoint at end of batch
-        since = str(last_seq)
-        await checkpoint.save(since, http, base_url, basic_auth, auth_headers)
-        if metrics:
-            metrics.inc("checkpoint_saves_total")
-            metrics.set("checkpoint_seq", since)
-    else:
-        # Sequential modes already checkpointed per-doc/sub-batch;
-        # advance to last_seq if it differs from the last saved seq
-        end_seq = str(last_seq)
-        if end_seq != since:
-            since = end_seq
+    if not output_failed:
+        if not sequential:
+            # Parallel mode: single checkpoint at end of batch
+            since = str(last_seq)
             await checkpoint.save(since, http, base_url, basic_auth, auth_headers)
             if metrics:
                 metrics.inc("checkpoint_saves_total")
                 metrics.set("checkpoint_seq", since)
+        else:
+            # Sequential modes already checkpointed per-doc/sub-batch;
+            # advance to last_seq if it differs from the last saved seq
+            end_seq = str(last_seq)
+            if end_seq != since:
+                since = end_seq
+                await checkpoint.save(since, http, base_url, basic_auth, auth_headers)
+                if metrics:
+                    metrics.inc("checkpoint_saves_total")
+                    metrics.set("checkpoint_seq", since)
 
-    if metrics:
-        metrics.record_batch_processing_time(time.monotonic() - batch_t0)
-        metrics.inc("batches_total")
+        if metrics:
+            metrics.record_batch_processing_time(time.monotonic() - batch_t0)
+            metrics.inc("batches_total")
 
-    return since, False
+    # Consolidated INFO summary: one line per batch instead of many per-op lines
+    batch_elapsed_ms = (time.monotonic() - batch_t0) * 1000
+    filtered_out = deleted_count + removed_count
+    docs_missing = max(0, docs_requested - docs_fetched_count)
+    ckpt_status = "moved" if not output_failed else "held"
+    log_event(
+        logger,
+        "info",
+        "PROCESSING",
+        "%.0fms | batch %d changes | %d ok | %d failed"
+        % (batch_elapsed_ms, len(results), batch_success, batch_fail),
+        out_ms=round(batch_out_ms, 1),
+        seq_from=since,
+        seq_to=str(last_seq),
+        include_docs=include_docs,
+        docs_fetched=docs_fetched_count if not include_docs else None,
+        docs_missing=docs_missing if docs_missing else None,
+        filtered_out=filtered_out if filtered_out else None,
+        attachments=1 if has_attachments else 0,
+        checkpoint=ckpt_status,
+    )
+
+    # Clear batch tracing ID now that this batch is complete.
+    set_batch_id(None)
+
+    return since, output_failed
 
 
 async def _catch_up_normal(
@@ -1512,6 +1766,8 @@ async def _catch_up_normal(
     shutdown_cfg: dict | None = None,
     initial_sync: bool = False,
     attachment_processor=None,
+    eventing_handler=None,
+    recursion_guard=None,
 ) -> str:
     """
     Phase 1 of continuous mode: catch up using one-shot normal requests.
@@ -1542,6 +1798,7 @@ async def _catch_up_normal(
         catchup_limit if (initial_sync and optimize_initial) or not initial_sync else 0
     )
     failure_count = 0
+    output_failure_count = 0  # separate counter for output-down backoff
 
     # When using optimized/chunked initial sync, fetch the database
     # update_seq first so we know the exact endpoint to reach.
@@ -1587,14 +1844,47 @@ async def _catch_up_normal(
                 timeout=changes_http_timeout,
             )
             raw_body = await resp.read()
-            body = _json_loads(raw_body)
+            try:
+                body = _json_loads(raw_body)
+            except (json.JSONDecodeError, ValueError):
+                failure_count += 1
+                log_event(
+                    logger,
+                    "warn",
+                    "CHANGES",
+                    "catch-up: invalid JSON response — retrying",
+                    response_bytes=len(raw_body),
+                    preview=raw_body[:200],
+                    attempt=failure_count,
+                )
+                if metrics:
+                    metrics.inc("stream_parse_errors_total")
+                    metrics.inc("poll_errors_total")
+                resp.release()
+                await _sleep_with_backoff(retry_cfg, failure_count, shutdown_event)
+                continue
             if metrics:
                 metrics.inc("bytes_received_total", len(raw_body))
                 metrics.record_changes_request_time(time.monotonic() - t0_changes)
             resp.release()
             failure_count = 0
         except (ClientHTTPError, RedirectHTTPError) as exc:
-            logger.error("Non-retryable error during catch-up: %s", exc)
+            if isinstance(exc, ClientHTTPError) and exc.status in (401, 403):
+                log_event(
+                    logger,
+                    "error",
+                    "HTTP",
+                    "authentication failed — pipeline will stop",
+                    status=exc.status,
+                )
+            else:
+                log_event(
+                    logger,
+                    "error",
+                    "CHANGES",
+                    "non-retryable error during catch-up",
+                    error_detail=str(exc),
+                )
             if metrics:
                 metrics.inc("poll_errors_total")
             raise
@@ -1605,8 +1895,20 @@ async def _catch_up_normal(
             asyncio.TimeoutError,
         ) as exc:
             failure_count += 1
-            logger.error(
-                "Catch-up request failed (attempt #%d): %s", failure_count, exc
+            if failure_count == 1:
+                log_event(
+                    logger,
+                    "warn",
+                    "RETRY",
+                    "source unreachable — waiting for source to become available (will retry with backoff)",
+                )
+            log_event(
+                logger,
+                "error",
+                "CHANGES",
+                "catch-up request failed",
+                attempt=failure_count,
+                error_detail=str(exc),
             )
             if metrics:
                 metrics.inc("poll_errors_total")
@@ -1638,13 +1940,18 @@ async def _catch_up_normal(
             shutdown_cfg=shutdown_cfg,
             initial_sync=initial_sync,
             attachment_processor=attachment_processor,
+            eventing_handler=eventing_handler,
+            recursion_guard=recursion_guard,
         )
 
         if output_failed:
-            await _sleep_or_shutdown(
-                feed_cfg.get("poll_interval_seconds", 10), shutdown_event
+            output_failure_count += 1
+            await _sleep_with_backoff(
+                retry_cfg, output_failure_count, shutdown_event, output_down=True
             )
             continue
+        else:
+            output_failure_count = 0
 
         # ── Output backpressure check ─────────────────────────────────
         await _maybe_backpressure(metrics, shutdown_event)
@@ -1721,6 +2028,8 @@ async def _consume_continuous_stream(
     timeout_ms: int,
     shutdown_cfg: dict | None = None,
     attachment_processor=None,
+    eventing_handler=None,
+    recursion_guard=None,
 ) -> str:
     """
     Phase 2 of continuous mode: open a streaming connection with
@@ -1736,10 +2045,11 @@ async def _consume_continuous_stream(
     # Use an open-ended HTTP timeout for the streaming connection
     continuous_timeout = aiohttp.ClientTimeout(total=None, sock_read=None)
 
-    logger.info("CONTINUOUS stream: connecting from since=%s", since)
+    log_event(logger, "info", "CHANGES", "continuous stream: connecting", seq=since)
     ic(changes_url, body_payload, since, "continuous stream")
 
     failure_count = 0
+    output_failure_count = 0  # separate counter for output-down backoff
 
     while not shutdown_event.is_set():
         try:
@@ -1758,20 +2068,52 @@ async def _consume_continuous_stream(
             asyncio.TimeoutError,
         ) as exc:
             failure_count += 1
-            logger.error(
-                "Continuous stream connect failed (attempt #%d): %s", failure_count, exc
+            if failure_count == 1:
+                log_event(
+                    logger,
+                    "warn",
+                    "RETRY",
+                    "source unreachable — waiting for source to become available (will retry with backoff)",
+                )
+            log_event(
+                logger,
+                "error",
+                "CHANGES",
+                "continuous stream connect failed",
+                attempt=failure_count,
+                error_detail=str(exc),
             )
             if metrics:
                 metrics.inc("poll_errors_total")
             await _sleep_with_backoff(retry_cfg, failure_count, shutdown_event)
             continue
         except (ClientHTTPError, RedirectHTTPError) as exc:
-            logger.error("Non-retryable error opening continuous stream: %s", exc)
+            if isinstance(exc, ClientHTTPError) and exc.status in (401, 403):
+                log_event(
+                    logger,
+                    "error",
+                    "HTTP",
+                    "authentication failed — pipeline will stop",
+                    status=exc.status,
+                )
+            else:
+                log_event(
+                    logger,
+                    "error",
+                    "CHANGES",
+                    "non-retryable error opening continuous stream",
+                    error_detail=str(exc),
+                )
             if metrics:
                 metrics.inc("poll_errors_total")
             raise
 
-        logger.info("CONTINUOUS stream: connected, listening for changes")
+        log_event(
+            logger,
+            "info",
+            "CHANGES",
+            "continuous stream: connected, listening for changes",
+        )
         if metrics and failure_count > 0:
             metrics.inc("stream_reconnects_total")
         failure_count = 0
@@ -1820,6 +2162,8 @@ async def _consume_continuous_stream(
                 max_concurrent=max_concurrent,
                 shutdown_cfg=shutdown_cfg,
                 attachment_processor=attachment_processor,
+                eventing_handler=eventing_handler,
+                recursion_guard=recursion_guard,
             )
             await _maybe_backpressure(metrics, shutdown_event)
             return result
@@ -1837,7 +2181,13 @@ async def _consume_continuous_stream(
                     metrics.inc("stream_messages_total")
                 return row
             except (json.JSONDecodeError, ValueError):
-                logger.warning("Continuous stream: unparseable line: %s", line[:200])
+                log_event(
+                    logger,
+                    "warn",
+                    "CHANGES",
+                    "continuous stream: unparseable line",
+                    preview=line[:200],
+                )
                 if metrics:
                     metrics.inc("stream_parse_errors_total")
                 return None
@@ -1850,7 +2200,12 @@ async def _consume_continuous_stream(
                 if raw_line == b"":
                     if buffer:
                         await _flush_buffer()
-                    logger.warning("Continuous stream closed by server (EOF)")
+                    log_event(
+                        logger,
+                        "warn",
+                        "CHANGES",
+                        "continuous stream closed by server (EOF)",
+                    )
                     break
 
                 row = _parse_line(raw_line)
@@ -1883,8 +2238,11 @@ async def _consume_continuous_stream(
                 if buffer:
                     since, output_failed = await _flush_buffer()
                     if output_failed:
-                        logger.warning(
-                            "Output failed during continuous stream – dropping to catch-up"
+                        log_event(
+                            logger,
+                            "warn",
+                            "CHANGES",
+                            "output failed during continuous stream – dropping to catch-up",
                         )
                         break
 
@@ -1892,16 +2250,36 @@ async def _consume_continuous_stream(
             body_payload["since"] = since
         except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError) as exc:
             failure_count += 1
-            logger.warning("Continuous stream read error: %s", exc)
+            if failure_count == 1:
+                log_event(
+                    logger,
+                    "warn",
+                    "RETRY",
+                    "source disconnected mid-stream — will reconnect with backoff",
+                )
+            log_event(
+                logger,
+                "warn",
+                "CHANGES",
+                "continuous stream read error",
+                error_detail=str(exc),
+            )
             if metrics:
                 metrics.inc("poll_errors_total")
         finally:
             resp.release()
 
-        if failure_count > 0:
+        if output_failed:
+            output_failure_count += 1
+            await _sleep_with_backoff(
+                retry_cfg, output_failure_count, shutdown_event, output_down=True
+            )
+        elif failure_count > 0:
+            output_failure_count = 0
             await _sleep_with_backoff(retry_cfg, failure_count, shutdown_event)
         else:
-            # Clean EOF / output failure – return to catch-up
+            output_failure_count = 0
+            # Clean EOF – return to catch-up
             return since
 
     return since
@@ -1931,6 +2309,8 @@ async def _consume_websocket_stream(
     timeout_ms: int,
     shutdown_cfg: dict | None = None,
     attachment_processor=None,
+    eventing_handler=None,
+    recursion_guard=None,
 ) -> str:
     """
     WebSocket mode: open a real WebSocket connection to the _changes
@@ -1973,10 +2353,11 @@ async def _consume_websocket_stream(
             credentials.encode("utf-8")
         ).decode("utf-8")
 
-    logger.info("WEBSOCKET stream: connecting from since=%s", since)
+    log_event(logger, "info", "CHANGES", "websocket stream: connecting", seq=since)
     ic(ws_url, payload, since, "websocket stream")
 
     failure_count = 0
+    output_failure_count = 0  # separate counter for output-down backoff
 
     while not shutdown_event.is_set():
         try:
@@ -1984,22 +2365,52 @@ async def _consume_websocket_stream(
                 ws_url,
                 headers=ws_headers,
                 heartbeat=None,  # SG does not respond to WS ping/pong
-                timeout=aiohttp.ClientWSTimeout(ws_close=timeout_ms / 1000.0),
+                timeout=aiohttp.ClientWSTimeout(ws_close=5.0),
             )
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            # Detect auth failure on WebSocket handshake (HTTP 401/403)
+            if isinstance(exc, aiohttp.WSServerHandshakeError) and exc.status in (
+                401,
+                403,
+            ):
+                log_event(
+                    logger,
+                    "error",
+                    "HTTP",
+                    "authentication failed — pipeline will stop",
+                    status=exc.status,
+                )
+                if metrics:
+                    metrics.inc("poll_errors_total")
+                raise ClientHTTPError(exc.status, str(exc))
             failure_count += 1
-            logger.error(
-                "WebSocket connect failed (attempt #%d): %s", failure_count, exc
+            if failure_count == 1:
+                log_event(
+                    logger,
+                    "warn",
+                    "RETRY",
+                    "source unreachable — waiting for source to become available (will retry with backoff)",
+                )
+            log_event(
+                logger,
+                "error",
+                "CHANGES",
+                "websocket connect failed",
+                attempt=failure_count,
+                error_detail=str(exc),
             )
             if metrics:
                 metrics.inc("poll_errors_total")
             await _sleep_with_backoff(retry_cfg, failure_count, shutdown_event)
             continue
 
-        logger.info("WEBSOCKET stream: connected, sending payload")
+        log_event(
+            logger, "info", "CHANGES", "websocket stream: connected, sending payload"
+        )
         if metrics and failure_count > 0:
             metrics.inc("stream_reconnects_total")
         failure_count = 0
+        output_failed = False
 
         try:
             # Send the request payload
@@ -2056,6 +2467,8 @@ async def _consume_websocket_stream(
                     max_concurrent=max_concurrent,
                     shutdown_cfg=shutdown_cfg,
                     attachment_processor=attachment_processor,
+                    eventing_handler=eventing_handler,
+                    recursion_guard=recursion_guard,
                 )
                 await _maybe_backpressure(metrics, shutdown_event)
                 return result
@@ -2071,8 +2484,11 @@ async def _consume_websocket_stream(
                     if metrics:
                         metrics.inc("stream_messages_total")
                 except (json.JSONDecodeError, ValueError):
-                    logger.warning(
-                        "WebSocket: unparseable message (length=%d)", len(msg.data)
+                    log_event(
+                        logger,
+                        "warn",
+                        "CHANGES",
+                        "websocket: unparseable message (%d bytes)" % len(msg.data),
                     )
                     if metrics:
                         metrics.inc("stream_parse_errors_total")
@@ -2096,10 +2512,13 @@ async def _consume_websocket_stream(
                     msg = await asyncio.wait_for(ws.receive(), timeout=ws_idle_timeout)
                 except asyncio.TimeoutError:
                     failure_count += 1
-                    logger.warning(
-                        "WebSocket idle timeout (%.0fs) – reconnecting (failure #%d)",
-                        ws_idle_timeout,
-                        failure_count,
+                    log_event(
+                        logger,
+                        "warn",
+                        "CHANGES",
+                        "websocket idle timeout (%.0fs) – reconnecting"
+                        % ws_idle_timeout,
+                        attempt=failure_count,
                     )
                     if metrics:
                         metrics.inc("poll_errors_total")
@@ -2152,8 +2571,11 @@ async def _consume_websocket_stream(
                             since, output_failed = await _flush_ws_buffer()
                             payload["since"] = since
                             if output_failed:
-                                logger.warning(
-                                    "Output failed during WebSocket stream – reconnecting"
+                                log_event(
+                                    logger,
+                                    "warn",
+                                    "CHANGES",
+                                    "output failed during websocket stream – reconnecting",
                                 )
                                 break
                         continue
@@ -2163,35 +2585,85 @@ async def _consume_websocket_stream(
                         since, output_failed = await _flush_ws_buffer()
                         payload["since"] = since
                         if output_failed:
-                            logger.warning(
-                                "Output failed during WebSocket stream – reconnecting"
+                            log_event(
+                                logger,
+                                "warn",
+                                "CHANGES",
+                                "output failed during websocket stream – reconnecting",
                             )
                             break
 
                 elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING):
                     if buffer:
                         await _flush_ws_buffer()
-                    logger.warning("WebSocket stream closed by server")
+                    log_event(
+                        logger, "warn", "CHANGES", "websocket stream closed by server"
+                    )
                     break
                 elif msg.type == aiohttp.WSMsgType.ERROR:
                     if buffer:
                         await _flush_ws_buffer()
-                    logger.warning("WebSocket stream error: %s", ws.exception())
+                    log_event(
+                        logger,
+                        "warn",
+                        "CHANGES",
+                        "websocket stream error",
+                        error_detail=str(ws.exception()),
+                    )
                     break
 
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
             failure_count += 1
-            logger.warning("WebSocket stream read error: %s", exc)
+            if failure_count == 1:
+                log_event(
+                    logger,
+                    "warn",
+                    "RETRY",
+                    "source disconnected mid-stream — will reconnect with backoff",
+                )
+            log_event(
+                logger,
+                "warn",
+                "CHANGES",
+                "websocket stream read error",
+                error_detail=str(exc),
+            )
             if metrics:
                 metrics.inc("poll_errors_total")
         finally:
             if not ws.closed:
-                await ws.close()
+                try:
+                    await asyncio.wait_for(ws.close(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    log_event(
+                        logger,
+                        "warn",
+                        "CHANGES",
+                        "websocket close timed out – forcing reconnect",
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as close_exc:
+                    log_event(
+                        logger,
+                        "warn",
+                        "CHANGES",
+                        "websocket close failed – forcing reconnect",
+                        error_detail=str(close_exc),
+                    )
 
-        if failure_count > 0:
+        # Output failure uses its own escalating counter so backoff grows
+        # to 5 min even though the *source* reconnects fine each time.
+        if output_failed:
+            output_failure_count += 1
+            await _sleep_with_backoff(
+                retry_cfg, output_failure_count, shutdown_event, output_down=True
+            )
+        elif failure_count > 0:
+            output_failure_count = 0  # source error, not output
             await _sleep_with_backoff(retry_cfg, failure_count, shutdown_event)
         else:
-            # Clean close – reconnect immediately for more changes
+            output_failure_count = 0  # clean cycle — reset
             continue
 
     return since
@@ -2282,11 +2754,10 @@ async def _replay_dead_letter_queue(
                 logger,
                 "warn",
                 "DLQ",
-                "DLQ entry target_url differs from current config",
+                "DLQ entry target_url differs from current config (entry=%s current=%s)"
+                % (entry_target, current_target_url),
                 doc_id=doc_id,
                 dlq_id=dlq_id,
-                entry_target=entry_target,
-                current_target=current_target_url,
             )
 
         # Get the full doc data
@@ -2305,12 +2776,12 @@ async def _replay_dead_letter_queue(
         doc = full_entry.get("doc_data", {})
         log_event(
             logger,
-            "info",
+            "debug",
             "DLQ",
             "replaying DLQ entry",
             doc_id=doc_id,
             dlq_id=dlq_id,
-            method=method,
+            http_method=method,
             replay_attempt=replay_attempts + 1,
         )
 
@@ -2321,7 +2792,7 @@ async def _replay_dead_letter_queue(
                 succeeded += 1
                 log_event(
                     logger,
-                    "info",
+                    "debug",
                     "DLQ",
                     "DLQ entry replayed successfully – purged",
                     doc_id=doc_id,

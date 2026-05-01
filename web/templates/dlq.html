@@ -170,7 +170,7 @@
              </div>
 
              <!-- TAB: DLQ (Failed Documents) -->
-             <div id="content-dlq" class="tab-content">
+             <div id="content-dlq" class="dlq-tab-panel">
                <div class="flex items-center justify-between mb-3">
                  <h2 class="card-title text-sm">Entries</h2>
                  <div class="flex items-center gap-2">
@@ -236,7 +236,7 @@
              </div>
 
              <!-- TAB: Data Quality (Fixed Documents) -->
-             <div id="content-dq" class="tab-content hidden">
+             <div id="content-dq" class="dlq-tab-panel hidden">
                <div class="flex items-center justify-between mb-3">
                  <h2 class="card-title text-sm">Fixed Documents</h2>
                  <div class="flex items-center gap-2">
@@ -282,7 +282,7 @@
              </div>
 
              <!-- TAB: Audit Log (Beta) -->
-             <div id="content-audit" class="tab-content hidden">
+             <div id="content-audit" class="dlq-tab-panel hidden">
                <div class="flex items-center justify-between mb-3">
                  <h2 class="card-title text-sm">Audit Log</h2>
                  <div class="flex items-center gap-2">
@@ -649,6 +649,9 @@
             return r.json();
           })
           .then(function (data) {
+            if (data.query_error) {
+              console.warn("DLQ query fallback:", data.query_error);
+            }
             pageEntries = data.entries || [];
             totalFiltered = data.filtered || 0;
             totalAll = data.total || 0;
@@ -658,7 +661,8 @@
           })
           .catch(function (err) {
             console.error("Failed to load DLQ page:", err);
-            showToast("Failed to load DLQ entries", "error");
+            document.getElementById("dlqTableBody").innerHTML =
+              '<tr><td colspan="8" class="text-center text-error py-8">Failed to load: ' + err + '</td></tr>';
           });
       }
 

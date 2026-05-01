@@ -26,6 +26,7 @@
     .log-stage-process { background: rgba(30, 80, 160, 0.18); border-left-color: #3abff8; }
     .log-stage-output  { background: rgba(160, 120, 10, 0.18); border-left-color: #fbbd23; }
     .log-stage-dlq     { background: rgba(160, 50, 50, 0.18); border-left-color: #f87272; }
+    .log-stage-infra   { background: rgba(130, 100, 200, 0.14); border-left-color: #a78bfa; }
     .log-viewer { height: 520px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace; font-size: 0.8rem; line-height: 1.6; }
     .log-ts { color: oklch(var(--bc) / 0.4); white-space: nowrap; }
     .log-msg { word-break: break-word; }
@@ -85,24 +86,52 @@
           </div>
         </div>
 
-        <!-- Row 2: Job + Pipeline + Level (all one row) -->
+        <!-- Row 1b: Pagination + Page Size + Jump to Time -->
+        <div class="flex flex-wrap items-center gap-2">
+          <button class="btn btn-xs btn-ghost" id="btnOlder" onclick="pageOlder()" disabled>← Older</button>
+          <button class="btn btn-xs btn-ghost" id="btnNewer" onclick="pageNewer()" disabled>Newer →</button>
+          <button class="btn btn-xs btn-ghost" id="btnLatest" onclick="goLatest()">Latest ⏭</button>
+          <span class="text-xs font-semibold opacity-60 ml-2">Page size:</span>
+          <select id="pageSizeSelect" class="select select-xs select-bordered w-20" onchange="onPageSizeChange()">
+            <option value="500" selected>500</option>
+            <option value="1000">1000</option>
+            <option value="2000">2000</option>
+            <option value="5000">5000</option>
+          </select>
+          <span class="text-xs font-semibold opacity-60 ml-3">Jump to line:</span>
+          <input type="number" id="jumpLine" class="input input-bordered input-xs w-24 font-mono" min="1" placeholder="line #" />
+          <button class="btn btn-xs btn-ghost" onclick="jumpToLine()">Go</button>
+          <span class="text-xs font-semibold opacity-60 ml-2">or time:</span>
+          <input type="datetime-local" id="jumpTime" class="input input-bordered input-xs w-48 font-mono" step="1" />
+          <button class="btn btn-xs btn-ghost" onclick="jumpToTime()">Go</button>
+          <span class="text-xs opacity-40 font-mono" id="offsetInfo"></span>
+        </div>
+
+        <!-- Row 2: Job + Session + Batch + Pipeline + Level -->
         <div class="flex flex-wrap items-center gap-1.5">
           <span class="text-xs font-semibold opacity-60">Job:</span>
           <select id="jobFilter" class="select select-xs select-bordered w-48" onchange="handleJobFilterChange(event)">
             <option value="">All Jobs</option>
           </select>
-          
+          <span class="text-xs font-semibold opacity-60 ml-2">Session:</span>
+          <select id="sessionFilter" class="select select-xs select-bordered w-32" onchange="applyFilters()">
+            <option value="">All</option>
+          </select>
+          <span class="text-xs font-semibold opacity-60 ml-2">Batch:</span>
+          <input type="text" id="batchFilter" class="input input-bordered input-xs w-24 font-mono" placeholder="#b:..." oninput="applyFilters()" />
+
           <span class="text-xs font-semibold opacity-60 ml-4">Pipeline:</span>
           <button class="btn btn-xs stage-btn" data-stage="source"  style="border-color:#36d399;color:#36d399;" onclick="toggleStage('source')">● Source <span class="stage-count" data-stage-count="source"></span></button>
           <button class="btn btn-xs stage-btn" data-stage="process" style="border-color:#3abff8;color:#3abff8;" onclick="toggleStage('process')">● Process <span class="stage-count" data-stage-count="process"></span></button>
-          <button class="btn btn-xs stage-btn" data-stage="dlq"     style="border-color:#f87272;color:#f87272;" onclick="toggleStage('dlq')">● DLQ <span class="stage-count" data-stage-count="dlq"></span></button>
           <button class="btn btn-xs stage-btn" data-stage="output"  style="border-color:#fbbd23;color:#fbbd23;" onclick="toggleStage('output')">● Output <span class="stage-count" data-stage-count="output"></span></button>
+          <button class="btn btn-xs stage-btn" data-stage="dlq"     style="border-color:#f87272;color:#f87272;" onclick="toggleStage('dlq')">● DLQ <span class="stage-count" data-stage-count="dlq"></span></button>
+          <button class="btn btn-xs stage-btn" data-stage="infra"   style="border-color:#a78bfa;color:#a78bfa;" onclick="toggleStage('infra')">● Infra <span class="stage-count" data-stage-count="infra"></span></button>
           <span class="text-xs font-semibold opacity-60 ml-2">Level:</span>
           <button class="btn btn-xs filter-btn" data-filter="level" data-value="ERROR"   style="background:#f87272;color:#1d232a;border:none;">ERROR <span class="level-count" data-level-count="ERROR"></span></button>
           <button class="btn btn-xs filter-btn" data-filter="level" data-value="WARNING" style="background:#fbbd23;color:#1d232a;border:none;">WARNING <span class="level-count" data-level-count="WARNING"></span></button>
           <button class="btn btn-xs filter-btn" data-filter="level" data-value="INFO"    style="background:#3abff8;color:#1d232a;border:none;">INFO <span class="level-count" data-level-count="INFO"></span></button>
           <button class="btn btn-xs filter-btn" data-filter="level" data-value="DEBUG"   style="background:#6b7280;color:#e5e7eb;border:none;">DEBUG <span class="level-count" data-level-count="DEBUG"></span></button>
-
+          <button class="btn btn-xs filter-btn" data-filter="level" data-value="TRACE"   style="background:#4b5563;color:#9ca3af;border:none;">TRACE <span class="level-count" data-level-count="TRACE"></span></button>
         </div>
 
         <!-- Row 3: Time Range Slider -->
@@ -180,6 +209,28 @@
             </div>
             <div id="chartPipeline" style="width:100%;height:280px"></div>
           </div>
+        </div>
+      </div>
+      <!-- Log Volume Timeline (full width) -->
+      <div class="card bg-base-100 shadow rounded-2xl">
+        <div class="card-body p-4">
+          <div class="flex items-center justify-between mb-1">
+            <div class="flex items-center gap-1">
+              <h3 class="text-sm font-semibold opacity-70">Log Volume Timeline</h3>
+              <div class="dropdown dropdown-hover dropdown-right" style="z-index:9999;">
+                <label tabindex="0"><svg class="opacity-40 cursor-help" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg></label>
+                <div tabindex="0" class="dropdown-content bg-base-100 rounded-xl shadow-lg p-4 w-72 text-xs leading-relaxed border border-base-content/10">
+                  <p class="font-bold mb-2">How to read this chart</p>
+                  <p class="mb-1">Shows log line counts per minute, broken down by level.</p>
+                  <p class="mb-1"><span style="color:#f87272;">■</span> <strong>Errors</strong> — spikes indicate failures to investigate.</p>
+                  <p class="mb-1"><span style="color:#fbbd23;">■</span> <strong>Warnings</strong> — elevated warnings may precede errors.</p>
+                  <p class="mb-1"><span style="color:#3abff8;">■</span> <strong>Info</strong> — normal activity baseline.</p>
+                  <p><span style="color:#6b7280;">■</span> <strong>Debug</strong> — verbose detail (often high volume).</p>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="chartVolume" style="width:100%;height:280px"></div>
         </div>
       </div>
       <!-- Bar charts side by side -->
@@ -260,10 +311,11 @@
   // ── Pipeline stage mapping ────────────────────────────────
   // Maps log_key → pipeline stage for coloring
   var LOG_KEY_STAGE = {
-    CHANGES: 'source', HTTP: 'source', CHECKPOINT: 'source',
-    PROCESSING: 'process', MAPPING: 'process', METRICS: 'process', CBL: 'process',
-    OUTPUT: 'output', RETRY: 'output',
-    DLQ: 'dlq'
+    CHANGES: 'source', HTTP: 'source',
+    PROCESSING: 'process', EVENTING: 'process', ATTACHMENT: 'process', MAPPING: 'process', FLOOD: 'process',
+    OUTPUT: 'output', CHECKPOINT: 'output', RETRY: 'output',
+    DLQ: 'dlq',
+    CBL: 'infra', METRICS: 'infra', CONTROL: 'infra', SHUTDOWN: 'infra'
   };
 
   // ── State ────────────────────────────────────────────────
@@ -273,11 +325,10 @@
   var tailing = false;
   var tailTimer = null;
   var feedOnline = true;
-  var MAX_LINES = 1000;
 
-  var activeLevels   = { ERROR: true, WARNING: true, INFO: true, DEBUG: true };
-  var activeLogKeys  = { CHANGES: true, PROCESSING: true, MAPPING: true, OUTPUT: true, HTTP: true, CHECKPOINT: true, RETRY: true, METRICS: true, CBL: true, DLQ: true };
-  var activeStages   = { source: true, process: true, output: true, dlq: true };
+  var activeLevels   = { ERROR: true, WARNING: true, INFO: true, DEBUG: true, TRACE: true };
+  var activeLogKeys  = { CHANGES: true, HTTP: true, PROCESSING: true, EVENTING: true, ATTACHMENT: true, MAPPING: true, FLOOD: true, OUTPUT: true, CHECKPOINT: true, RETRY: true, DLQ: true, CBL: true, METRICS: true, CONTROL: true, SHUTDOWN: true };
+  var activeStages   = { source: true, process: true, output: true, dlq: true, infra: true };
 
   var currentFile = 'changes_worker.log';
   var timeRangeMin = null;
@@ -286,27 +337,99 @@
   var chartStages = null;
   var chartTimeline = null;
   var chartPipeline = null;
+  var chartVolume = null;
   var yAxisLog = false;
   var lastBucketKeys = [];
   var stakes = []; // array of { timestamp, bucketKey, stakeId }
   var stakeCounter = 0;
   var STAKE_COLORS = ['#e879f9','#22d3ee','#fb923c','#a3e635','#f472b6','#60a5fa'];
-  var totalFileLines = 0;
+  var fileSize = 0;
+  var pageSize = 500;
+  var fromLine = 0;       // first line number in current page (0-based from top)
+  var toLine = 0;         // line after last in current page
+  var totalLines = 0;     // total lines in the file
+  var hasOlder = false;
+  var hasNewer = false;
+  var serverHtml = '';        // pre-rendered HTML from server
+  var serverCounts = null;    // { levels: {...}, stages: {...} }
+  var serverTimeBuckets = null;  // { "YYYY-MM-DD HH:MM": {...} }
 
   // ── Log line parser ──────────────────────────────────────
-  // Pattern: TIMESTAMP [LEVEL] LOGGER: MESSAGE [LOG_KEY] key=value key=value...
-  var LOG_RE = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[.,]\d+)\s+\[(\w+)\]\s+(\S+?):\s+(.*)$/;
+  // New format: TIMESTAMP [LEVEL] [KEY] job=..JOB #s:..SESSION #b:BATCH LOGGER: MESSAGE | field value | ...
+  // Legacy format: TIMESTAMP [LEVEL] LOGGER: MESSAGE [LOG_KEY] key=value ...
+  var LOG_RE_NEW = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[.,]\d+)\s+\[(\w+)\]\s*\[([A-Z_]+)\]\s+(.*?)(\S+?):\s+(.*)$/;
+  var LOG_RE_OLD = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[.,]\d+)\s+\[(\w+)\]\s+(\S+?):\s+(.*)$/;
 
   function parseLogLine(raw) {
-    var m = LOG_RE.exec(raw);
-    if (!m) return { timestamp: '', level: 'INFO', logger: '', message: raw, log_key: '', fields: {}, raw: raw };
+    // Try new format first
+    var m = LOG_RE_NEW.exec(raw);
+    if (m) {
+      var timestamp = m[1];
+      var level = m[2];
+      var log_key = m[3];
+      var prefix = m[4];  // job=..xxx #s:..yyy #b:zzz
+      var logger = m[5];
+      var rest = m[6];
+
+      // Extract context tags from prefix
+      var job_tag = '';
+      var session_tag = '';
+      var batch_tag = '';
+      var jm = prefix.match(/job=\.\.(\S+)/);
+      if (jm) job_tag = jm[1];
+      var sm = prefix.match(/#s:\.\.(\S+)/);
+      if (sm) session_tag = sm[1];
+      var bm = prefix.match(/#b:(\S+)/);
+      if (bm) batch_tag = bm[1];
+
+      // Parse pipe-delimited: MESSAGE_WITH_PIPES | field1 value | field2 value
+      // Fields are at the END. Scan backwards to find contiguous field segments.
+      var KNOWN_FIELDS = {job:1,op:1,doc_id:1,seq:1,status:1,url:1,attempt:1,
+        el_ms:1,dur_ms:1,out_ms:1,mode:1,method:1,bytes:1,store:1,batch:1,
+        in_count:1,filt_count:1,host:1,port:1,delay_s:1,field_ct:1,err:1,
+        doc_count:1,doc_type:1,seq_from:1,seq_to:1,inc_docs:1,fetched:1,
+        docs_miss:1,attach:1,ok:1,failed:1,filt_out:1,chkpt:1,
+        db_name:1,db_path:1,db_mb:1,manifest:1,maint:1,trigger:1,session:1,
+        rev:1,new_rev:1,pp_action:1};
+      var fields = {};
+      var message = rest;
+      var pipeIdx = rest.indexOf(' | ');
+      if (pipeIdx !== -1) {
+        var segments = rest.split(' | ');
+        var firstField = segments.length;
+        for (var i = segments.length - 1; i > 0; i--) {
+          var seg = segments[i].trim();
+          if (!seg) continue;
+          var spIdx = seg.indexOf(' ');
+          var key = spIdx !== -1 ? seg.substring(0, spIdx) : seg;
+          if (KNOWN_FIELDS[key]) {
+            firstField = i;
+            fields[key] = spIdx !== -1 ? seg.substring(spIdx + 1) : '';
+          } else {
+            break;
+          }
+        }
+        message = segments.slice(0, firstField).join(' | ');
+      }
+
+      // Inject context tags as fields for display/filtering
+      if (job_tag) fields['job_tag'] = job_tag;
+      if (session_tag) fields['session'] = session_tag;
+      if (batch_tag) fields['batch'] = batch_tag;
+
+      return { timestamp: timestamp, level: level, logger: logger, message: message, log_key: log_key, fields: fields, job_tag: job_tag, session_tag: session_tag, batch_tag: batch_tag, raw: raw };
+    }
+
+    // Fallback: legacy format
+    m = LOG_RE_OLD.exec(raw);
+    if (!m) return { timestamp: '', level: 'INFO', logger: '', message: raw, log_key: '', fields: {}, job_tag: '', session_tag: '', batch_tag: '', raw: raw };
 
     var timestamp = m[1];
     var level = m[2];
     var logger = m[3];
     var rest = m[4];
 
-    // Extract [LOG_KEY]
+    // Extract [LOG_KEY] from legacy format
     var log_key = '';
     var keyMatch = rest.match(/\[([A-Z_]+)\]/);
     if (keyMatch) {
@@ -315,7 +438,6 @@
     }
 
     // Extract key=value fields from the end
-    // error_detail is always last and can contain spaces
     var fields = {};
     var message = rest;
 
@@ -325,7 +447,6 @@
       rest = rest.substring(0, rest.length - detailMatch[0].length);
     }
 
-    // Parse remaining simple key=value pairs (no spaces in values)
     var kvRe = /\s+(\w+)=(\S+)/g;
     var kvMatch;
     var lastKvStart = rest.length;
@@ -345,13 +466,15 @@
       message = rest.trim();
     }
 
-    return { timestamp: timestamp, level: level, logger: logger, message: message, log_key: log_key, fields: fields, raw: raw };
+    return { timestamp: timestamp, level: level, logger: logger, message: message, log_key: log_key, fields: fields, job_tag: '', session_tag: '', batch_tag: '', raw: raw };
   }
 
   // ── Filter logic ─────────────────────────────────────────
   function applyFilters() {
     var search = document.getElementById('logSearch').value.toLowerCase();
     var selectedJobId = document.getElementById('jobFilter').value;  // Get selected job filter
+    var sessionFilter = document.getElementById('sessionFilter').value;
+    var batchFilter = document.getElementById('batchFilter').value;
     // Time range filter
     var minVal = parseInt(document.getElementById('rangeMin').value);
     var maxVal = parseInt(document.getElementById('rangeMax').value);
@@ -371,11 +494,15 @@
       // Stage filter
       var stage = LOG_KEY_STAGE[e.log_key] || 'process';
       if (!activeStages[stage]) continue;
-      // Job ID filter
+      // Job tag filter
       if (selectedJobId) {
-        var logJobId = e.fields && e.fields.job_id ? e.fields.job_id : '';
-        if (logJobId !== selectedJobId) continue;
+        var logJobTag = e.job_tag || (e.fields && e.fields.job_id ? e.fields.job_id : '');
+        if (logJobTag !== selectedJobId && logJobTag.indexOf(selectedJobId) === -1) continue;
       }
+      // Session filter
+      if (sessionFilter && e.session_tag !== sessionFilter) continue;
+      // Batch filter
+      if (batchFilter && e.batch_tag !== batchFilter) continue;
       if (search && (e.raw || (e.message + ' ' + JSON.stringify(e.fields))).toLowerCase().indexOf(search) === -1) continue;
       filteredLogs.push(e);
     }
@@ -388,59 +515,69 @@
     var viewer = document.getElementById('logViewer');
     if (filteredLogs.length === 0) {
       viewer.innerHTML = '<div class="text-center opacity-40 py-12">No matching log entries.</div>';
-      document.getElementById('countBadge').textContent = '0 / ' + allLogs.length + (totalFileLines ? ' of ' + totalFileLines : '');
+      document.getElementById('countBadge').textContent = '0 / ' + allLogs.length + (fileSize ? ' (' + fmtSize(fileSize) + ')' : '');
       return;
     }
 
-    var html = '';
-    for (var i = 0; i < filteredLogs.length; i++) {
-      var e = filteredLogs[i];
-      var sel = (selectedEntry && selectedEntry.raw === e.raw && selectedEntry.timestamp === e.timestamp) ? ' selected' : '';
-      var stage = LOG_KEY_STAGE[e.log_key] || '';
-      var stageCls = stage ? ' log-stage-' + stage : '';
-      var stakeInfo = getStakeForEntry(e);
-      var stakedCls = stakeInfo ? ' staked' : '';
-      html += '<div class="log-line flex flex-wrap items-start gap-2 px-3 py-1' + sel + stageCls + stakedCls + '" data-idx="' + i + '" onclick="onLogClick(' + i + ')">';
-      if (stakeInfo) {
-        html += '<span class="stake-tag" style="background:' + stakeInfo.color + '">' + ICO.pin + ' S' + stakeInfo.stakeId + '</span>';
+    // Use server-rendered HTML if no client-side filters are active
+    if (serverHtml && !hasActiveClientFilters()) {
+      viewer.innerHTML = serverHtml;
+    } else {
+      // Client-side re-render only when filters narrow the view
+      var html = '';
+      for (var i = 0; i < filteredLogs.length; i++) {
+        var e = filteredLogs[i];
+        var stage = LOG_KEY_STAGE[e.log_key] || '';
+        var stageCls = stage ? ' log-stage-' + stage : '';
+        html += '<div class="log-line flex flex-wrap items-start gap-2 px-3 py-1' + stageCls + '" data-idx="' + i + '" onclick="onLogClick(' + i + ')">';
+        html += '<span class="log-ts">' + esc(e.timestamp) + '</span>';
+        html += levelBadge(e.level);
+        if (e.log_key) html += '<span class="badge badge-outline badge-xs">' + esc(e.log_key) + '</span>';
+        if (e.job_tag) html += '<span class="badge badge-secondary badge-xs font-mono" title="Job tag">job:..' + esc(e.job_tag) + '</span>';
+        if (e.session_tag) html += '<span class="badge badge-accent badge-xs font-mono" title="Session ID">#s:..' + esc(e.session_tag) + '</span>';
+        if (e.batch_tag) html += '<span class="badge badge-primary badge-xs font-mono" title="Batch ID">#b:' + esc(e.batch_tag) + '</span>';
+        if (e.fields && e.fields.doc_id) html += '<span class="badge badge-primary badge-xs font-mono">' + ICO.doc + ' ' + esc(e.fields.doc_id) + '</span>';
+        html += '<span class="log-msg flex-1">' + esc(e.message) + '</span>';
+        var skipFields = { doc_id: 1, job_tag: 1, session: 1, batch: 1, job_id: 1 };
+        var keys = Object.keys(e.fields);
+        for (var j = 0; j < keys.length; j++) {
+          if (skipFields[keys[j]]) continue;
+          var v = e.fields[keys[j]];
+          if (v.length > 60) v = v.substring(0, 57) + '…';
+          html += '<span class="badge badge-ghost badge-xs font-mono">' + esc(keys[j]) + '=' + esc(v) + '</span>';
+        }
+        html += '</div>';
       }
-      html += '<span class="log-ts">' + esc(e.timestamp) + '</span>';
-      html += levelBadge(e.level);
-      if (e.log_key) {
-        html += '<span class="badge badge-outline badge-xs">' + esc(e.log_key) + '</span>';
-      }
-      // Show job_id if present
-      if (e.fields && e.fields.job_id) {
-        html += '<span class="badge badge-secondary badge-xs font-mono" title="Job ID">🔗 ' + esc(e.fields.job_id).substring(0, 12) + '</span>';
-      }
-      if (e.fields && e.fields.doc_id) {
-        html += '<span class="badge badge-primary badge-xs font-mono">' + ICO.doc + ' ' + esc(e.fields.doc_id) + '</span>';
-      }
-      html += '<span class="log-msg flex-1">' + esc(e.message) + '</span>';
-      // Extra fields as small badges
-      var keys = Object.keys(e.fields);
-      for (var j = 0; j < keys.length; j++) {
-        if (keys[j] === 'doc_id' || keys[j] === 'job_id') continue;  // Skip job_id, already shown
-        var v = e.fields[keys[j]];
-        if (v.length > 60) v = v.substring(0, 57) + '…';
-        html += '<span class="badge badge-ghost badge-xs font-mono">' + esc(keys[j]) + '=' + esc(v) + '</span>';
-      }
-      html += '</div>';
+      viewer.innerHTML = html;
     }
-    viewer.innerHTML = html;
-    document.getElementById('countBadge').textContent = filteredLogs.length + ' / ' + allLogs.length + (totalFileLines ? ' of ' + totalFileLines : '');
+
+    document.getElementById('countBadge').textContent = filteredLogs.length + ' / ' + allLogs.length + (fileSize ? ' (' + fmtSize(fileSize) + ')' : '');
 
     if (tailing) {
       viewer.scrollTop = viewer.scrollHeight;
     }
   }
 
+  function hasActiveClientFilters() {
+    if (document.getElementById('logSearch').value) return true;
+    if (document.getElementById('jobFilter').value) return true;
+    if (document.getElementById('sessionFilter').value) return true;
+    if (document.getElementById('batchFilter').value) return true;
+    var minVal = parseInt(document.getElementById('rangeMin').value);
+    var maxVal = parseInt(document.getElementById('rangeMax').value);
+    if (minVal > 0 || maxVal < 100) return true;
+    for (var lv in activeLevels) { if (!activeLevels[lv]) return true; }
+    for (var st in activeStages) { if (!activeStages[st]) return true; }
+    return false;
+  }
+
   function levelBadge(level) {
     var cls = 'badge badge-xs ';
-    if (level === 'ERROR')        cls += 'badge-error';
-    else if (level === 'WARNING') cls += 'badge-warning';
-    else if (level === 'INFO')    cls += 'badge-info';
-    else                          cls += 'badge-ghost';
+    if (level === 'ERROR' || level === 'CRITICAL') cls += 'badge-error';
+    else if (level === 'WARNING')                  cls += 'badge-warning';
+    else if (level === 'INFO')                     cls += 'badge-info';
+    else if (level === 'TRACE')                    cls += 'badge-ghost opacity-50';
+    else                                           cls += 'badge-ghost';
     return '<span class="' + cls + '">' + esc(level) + '</span>';
   }
 
@@ -572,17 +709,33 @@
     }
   }
 
-  function refreshLogs() {
-    var fetchUrl = '/api/logs?file=' + encodeURIComponent(currentFile);
+  function refreshLogs(params) {
+    var fetchUrl = '/api/logs?file=' + encodeURIComponent(currentFile)
+      + '&page_size=' + pageSize;
     // Server-side level filter: if DEBUG is off, skip it server-side too
     if (!activeLevels.DEBUG) fetchUrl += '&level=INFO';
+    // Pagination params
+    if (params && params.from_line != null) {
+      fetchUrl += '&from_line=' + params.from_line;
+    } else if (params && params.before_time) {
+      fetchUrl += '&before_time=' + encodeURIComponent(params.before_time);
+    }
+    // else: default = latest page (tail)
     fetch(fetchUrl)
       .then(function(r) { return r.json(); })
       .then(function(data) {
         var entries = data;
         if (data && !Array.isArray(data) && Array.isArray(data.entries)) {
           entries = data.entries;
-          totalFileLines = data.total_lines || 0;
+          fileSize = data.file_size || 0;
+          fromLine = data.from_line || 0;
+          toLine = data.to_line || 0;
+          totalLines = data.total_lines || 0;
+          hasOlder = data.has_older || false;
+          hasNewer = data.has_newer || false;
+          serverHtml = data.html || '';
+          serverCounts = data.counts || null;
+          serverTimeBuckets = data.time_buckets || null;
         }
         if (Array.isArray(entries)) {
           allLogs = [];
@@ -590,20 +743,70 @@
             if (typeof entries[i] === 'string') {
               allLogs.push(parseLogLine(entries[i]));
             } else {
+              if (!entries[i].hasOwnProperty('job_tag')) entries[i].job_tag = '';
+              if (!entries[i].hasOwnProperty('session_tag')) entries[i].session_tag = '';
+              if (!entries[i].hasOwnProperty('batch_tag')) entries[i].batch_tag = '';
               allLogs.push(entries[i]);
             }
           }
         }
-        // Keep last N lines
-        if (allLogs.length > MAX_LINES) {
-          allLogs = allLogs.slice(allLogs.length - MAX_LINES);
-        }
+        populateSessionFilter();
         applyFilters();
         updateTimeRange();
+        updatePaginationUI();
       })
       .catch(function(err) {
         console.error('Failed to fetch logs:', err);
       });
+  }
+
+  // ── Pagination ──────────────────────────────────────────
+  function pageOlder() {
+    if (fromLine > 0) {
+      if (tailing) toggleTail();
+      var start = Math.max(0, fromLine - pageSize);
+      refreshLogs({ from_line: start });
+    }
+  }
+
+  function pageNewer() {
+    if (toLine < totalLines) {
+      if (tailing) toggleTail();
+      refreshLogs({ from_line: toLine });
+    }
+  }
+
+  function goLatest() {
+    refreshLogs(); // no params = tail
+  }
+
+  function jumpToLine() {
+    var input = parseInt(document.getElementById('jumpLine').value);
+    if (!input || input < 1) return;
+    if (tailing) toggleTail();
+    // Input is 1-based (user-facing), API is 0-based
+    refreshLogs({ from_line: input - 1 });
+  }
+
+  function jumpToTime() {
+    var input = document.getElementById('jumpTime').value;
+    if (!input) return;
+    var ts = input.replace('T', ' ');
+    if (tailing) toggleTail();
+    refreshLogs({ before_time: ts });
+  }
+
+  function onPageSizeChange() {
+    pageSize = parseInt(document.getElementById('pageSizeSelect').value);
+    refreshLogs();
+  }
+
+  function updatePaginationUI() {
+    document.getElementById('btnOlder').disabled = !hasOlder;
+    document.getElementById('btnNewer').disabled = !hasNewer;
+    var info = 'Lines ' + (fromLine + 1) + '–' + toLine + ' of ' + totalLines
+      + ' (' + fmtSize(fileSize) + ')';
+    document.getElementById('offsetInfo').textContent = info;
   }
 
   // ── Stage filter toggle ──────────────────────────────────
@@ -763,6 +966,12 @@
     document.getElementById('rangeFill').style.right = (100 - maxVal) + '%';
   }
 
+  function fmtSize(bytes) {
+    if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
+    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return bytes + ' B';
+  }
+
   function fmtDT(d) {
     var mo = String(d.getMonth() + 1).padStart(2, '0');
     var dy = String(d.getDate()).padStart(2, '0');
@@ -778,9 +987,10 @@
     chartStages = echarts.init(document.getElementById('chartStages'));
     chartTimeline = echarts.init(document.getElementById('chartTimeline'));
     chartPipeline = echarts.init(document.getElementById('chartPipeline'));
+    chartVolume = echarts.init(document.getElementById('chartVolume'));
 
-    // Sync crosshair between the two line charts
-    echarts.connect([chartTimeline, chartPipeline]);
+    // Sync crosshair between all line charts
+    echarts.connect([chartTimeline, chartPipeline, chartVolume]);
 
     // Double-click anywhere on chart → scroll log viewer to that timestamp
     function scrollLogsToBucket(bucketKey) {
@@ -823,12 +1033,14 @@
     }
     onChartDblClick(chartTimeline);
     onChartDblClick(chartPipeline);
+    onChartDblClick(chartVolume);
 
     window.addEventListener('resize', function() {
       if (chartLevels) chartLevels.resize();
       if (chartStages) chartStages.resize();
       if (chartTimeline) chartTimeline.resize();
       if (chartPipeline) chartPipeline.resize();
+      if (chartVolume) chartVolume.resize();
     });
   }
 
@@ -900,55 +1112,31 @@
     return { symbol: 'none', data: lines };
   }
 
-  function updateBadgeCounts() {
-    var logs = filteredLogs;
-    // Level counts
-    var lc = { ERROR: 0, WARNING: 0, INFO: 0, DEBUG: 0 };
-    var sc = { source: 0, process: 0, output: 0, dlq: 0 };
-    var kc = {};
-    for (var i = 0; i < logs.length; i++) {
-      var e = logs[i];
-      if (lc.hasOwnProperty(e.level)) lc[e.level]++;
-      var st = LOG_KEY_STAGE[e.log_key] || 'process';
-      if (sc.hasOwnProperty(st)) sc[st]++;
-      if (e.log_key) kc[e.log_key] = (kc[e.log_key] || 0) + 1;
-    }
+  function updateBadgeCounts(levelCounts, stageCounts) {
     document.querySelectorAll('.level-count').forEach(function(el) {
       var v = el.getAttribute('data-level-count');
-      el.textContent = '(' + (lc[v] || 0) + ')';
+      el.textContent = '(' + (levelCounts[v] || 0) + ')';
     });
     document.querySelectorAll('.stage-count').forEach(function(el) {
       var v = el.getAttribute('data-stage-count');
-      el.textContent = '(' + (sc[v] || 0) + ')';
-    });
-    document.querySelectorAll('.key-count').forEach(function(el) {
-      var v = el.getAttribute('data-key-count');
-      el.textContent = '(' + (kc[v] || 0) + ')';
+      el.textContent = '(' + (stageCounts[v] || 0) + ')';
     });
   }
 
   function updateCharts() {
     if (!chartLevels) return;
-    var logs = filteredLogs;
 
-    // --- Badge counts ---
-    updateBadgeCounts();
+    // Use server-computed counts (single pass on backend)
+    var levelCounts = serverCounts ? serverCounts.levels : { ERROR: 0, WARNING: 0, INFO: 0, DEBUG: 0, TRACE: 0 };
+    var stageCounts = serverCounts ? serverCounts.stages : { source: 0, process: 0, output: 0, dlq: 0, infra: 0 };
 
-    // --- Aggregate counts ---
-    var levelCounts = { ERROR: 0, WARNING: 0, INFO: 0, DEBUG: 0 };
-    var stageCounts = { source: 0, process: 0, output: 0, dlq: 0 };
-    for (var i = 0; i < logs.length; i++) {
-      var lv = logs[i].level;
-      if (levelCounts.hasOwnProperty(lv)) levelCounts[lv]++;
-      var st = LOG_KEY_STAGE[logs[i].log_key] || 'process';
-      if (stageCounts.hasOwnProperty(st)) stageCounts[st]++;
-    }
+    updateBadgeCounts(levelCounts, stageCounts);
 
     // --- Bar: Log Levels ---
     chartLevels.setOption({
       tooltip: { trigger: 'axis' },
       grid: { left: 60, right: 20, top: 10, bottom: 25 },
-      xAxis: { type: 'category', data: ['ERROR', 'WARNING', 'INFO', 'DEBUG'], axisLabel: { color: '#aaa', fontSize: 11 }, axisLine: { lineStyle: { color: '#555' } } },
+      xAxis: { type: 'category', data: ['ERROR', 'WARNING', 'INFO', 'DEBUG', 'TRACE'], axisLabel: { color: '#aaa', fontSize: 11 }, axisLine: { lineStyle: { color: '#555' } } },
       yAxis: { type: 'value', axisLabel: { color: '#888', fontSize: 10 }, splitLine: { lineStyle: { color: '#333' } } },
       series: [{
         type: 'bar', barWidth: '50%',
@@ -956,7 +1144,8 @@
           { value: levelCounts.ERROR,   itemStyle: { color: '#f87272' } },
           { value: levelCounts.WARNING, itemStyle: { color: '#fbbd23' } },
           { value: levelCounts.INFO,    itemStyle: { color: '#3abff8' } },
-          { value: levelCounts.DEBUG,   itemStyle: { color: '#6b7280' } }
+          { value: levelCounts.DEBUG,   itemStyle: { color: '#6b7280' } },
+          { value: levelCounts.TRACE,   itemStyle: { color: '#4b5563' } }
         ],
         label: { show: true, position: 'top', color: '#aaa', fontSize: 11 }
       }]
@@ -966,53 +1155,29 @@
     chartStages.setOption({
       tooltip: { trigger: 'axis' },
       grid: { left: 60, right: 20, top: 10, bottom: 25 },
-      xAxis: { type: 'category', data: ['Source', 'Process', 'DLQ', 'Output'], axisLabel: { color: '#aaa', fontSize: 11 }, axisLine: { lineStyle: { color: '#555' } } },
+      xAxis: { type: 'category', data: ['Source', 'Process', 'Output', 'DLQ', 'Infra'], axisLabel: { color: '#aaa', fontSize: 11 }, axisLine: { lineStyle: { color: '#555' } } },
       yAxis: { type: 'value', axisLabel: { color: '#888', fontSize: 10 }, splitLine: { lineStyle: { color: '#333' } } },
       series: [{
         type: 'bar', barWidth: '50%',
         data: [
           { value: stageCounts.source,  itemStyle: { color: '#36d399' } },
           { value: stageCounts.process, itemStyle: { color: '#3abff8' } },
+          { value: stageCounts.output,  itemStyle: { color: '#fbbd23' } },
           { value: stageCounts.dlq,     itemStyle: { color: '#f87272' } },
-          { value: stageCounts.output,  itemStyle: { color: '#fbbd23' } }
+          { value: stageCounts.infra,   itemStyle: { color: '#a78bfa' } }
         ],
         label: { show: true, position: 'top', color: '#aaa', fontSize: 11 }
       }]
     });
 
-    // --- Time buckets (shared by both line charts) ---
-    var buckets = {};
-    var bucketKeys = [];
-    for (var i = 0; i < logs.length; i++) {
-      var ts = parseTS(logs[i].timestamp);
-      if (!ts) continue;
-      var key = ts.getFullYear() + '-' + String(ts.getMonth()+1).padStart(2,'0') + '-' + String(ts.getDate()).padStart(2,'0') + ' ' + String(ts.getHours()).padStart(2,'0') + ':' + String(ts.getMinutes()).padStart(2,'0');
-      if (!buckets[key]) {
-        buckets[key] = { errors: 0, warnings: 0, info: 0, debug: 0, source: 0, process: 0, output: 0, dlq: 0, changes: 0, total: 0, docs_in: 0, docs_out_ok: 0, docs_out_fail: 0, retries: 0 };
-        bucketKeys.push(key);
-      }
-      var b = buckets[key];
-      var e = logs[i];
-      b.total++;
-      if (e.level === 'ERROR') b.errors++;
-      if (e.level === 'WARNING') b.warnings++;
-      if (e.level === 'INFO') b.info++;
-      if (e.level === 'DEBUG') b.debug++;
-      var stg = LOG_KEY_STAGE[e.log_key] || 'process';
-      b[stg]++;
-      if (e.log_key === 'CHANGES') b.changes++;
-      // Actual document counts for pipeline correlation
-      if (e.fields && e.fields.doc_count) b.docs_in += parseInt(e.fields.doc_count, 10) || 0;
-      if (stg === 'output' && e.fields && e.fields.doc_id) {
-        if (e.level === 'ERROR') b.docs_out_fail++; else b.docs_out_ok++;
-      }
-      if (e.log_key === 'RETRY') b.retries++;
-    }
+    // --- Time buckets from server (pre-computed in single pass) ---
+    var buckets = serverTimeBuckets || {};
+    var bucketKeys = Object.keys(buckets).sort();
 
     var xData = bucketKeys;
     lastBucketKeys = bucketKeys;
     var docsInData = [], docsOutData = [], retriesData = [], pendingData = [], failRateData = [];
-    var srcData = [], prcData = [], outStgData = [], dlqData = [];
+    var srcData = [], prcData = [], outStgData = [], dlqData = [], infraData = [];
     var cumDocsIn = 0, cumDocsOutOk = 0, cumDocsOutFail = 0;
     for (var i = 0; i < xData.length; i++) {
       var b = buckets[xData[i]];
@@ -1023,6 +1188,7 @@
       prcData.push(b.process);
       outStgData.push(b.output);
       dlqData.push(b.dlq);
+      infraData.push(b.infra);
       cumDocsIn += b.docs_in;
       cumDocsOutOk += b.docs_out_ok;
       cumDocsOutFail += b.docs_out_fail;
@@ -1060,15 +1226,39 @@
     // --- Line: Pipeline Timeline ---
     chartPipeline.setOption({
       tooltip: crosshairTooltip,
-      legend: { data: ['Source', 'Process', 'DLQ', 'Output'], textStyle: { color: '#aaa', fontSize: 11 }, top: 0 },
+      legend: { data: ['Source', 'Process', 'Output', 'DLQ', 'Infra'], textStyle: { color: '#aaa', fontSize: 11 }, top: 0 },
       grid: { left: 50, right: 20, top: 30, bottom: 20 },
       xAxis: { type: 'category', data: xData, axisLabel: { color: '#888', fontSize: 10, rotate: 30 }, axisLine: { lineStyle: { color: '#555' } }, axisPointer: { label: { show: true } } },
       yAxis: yAxisOpt,
       series: [
         { name: 'Source',  type: 'line', data: srcData,    smooth: true, lineStyle: { width: 2, color: '#36d399' }, itemStyle: { color: '#36d399' }, symbol: 'none', areaStyle: { color: 'rgba(54,211,153,0.08)' }, markLine: stakeMarkLine },
         { name: 'Process', type: 'line', data: prcData,    smooth: true, lineStyle: { width: 2, color: '#3abff8' }, itemStyle: { color: '#3abff8' }, symbol: 'none', areaStyle: { color: 'rgba(58,191,248,0.08)' } },
+        { name: 'Output',  type: 'line', data: outStgData, smooth: true, lineStyle: { width: 2, color: '#fbbd23' }, itemStyle: { color: '#fbbd23' }, symbol: 'none', areaStyle: { color: 'rgba(251,189,35,0.08)' } },
         { name: 'DLQ',     type: 'line', data: dlqData,    smooth: true, lineStyle: { width: 2, color: '#f87272' }, itemStyle: { color: '#f87272' }, symbol: 'none', areaStyle: { color: 'rgba(248,114,114,0.08)' } },
-        { name: 'Output',  type: 'line', data: outStgData, smooth: true, lineStyle: { width: 2, color: '#fbbd23' }, itemStyle: { color: '#fbbd23' }, symbol: 'none', areaStyle: { color: 'rgba(251,189,35,0.08)' } }
+        { name: 'Infra',   type: 'line', data: infraData,  smooth: true, lineStyle: { width: 2, color: '#a78bfa' }, itemStyle: { color: '#a78bfa' }, symbol: 'none', areaStyle: { color: 'rgba(167,139,250,0.08)' } }
+      ]
+    });
+
+    // --- Line: Log Volume Timeline (by level per minute) ---
+    var errVolData = [], warnVolData = [], infoVolData = [], debugVolData = [];
+    for (var i = 0; i < xData.length; i++) {
+      var b = buckets[xData[i]];
+      errVolData.push(b.errors);
+      warnVolData.push(b.warnings);
+      infoVolData.push(b.info);
+      debugVolData.push(b.debug);
+    }
+    chartVolume.setOption({
+      tooltip: crosshairTooltip,
+      legend: { data: ['Errors', 'Warnings', 'Info', 'Debug'], textStyle: { color: '#aaa', fontSize: 11 }, top: 0 },
+      grid: { left: 50, right: 20, top: 30, bottom: 20 },
+      xAxis: { type: 'category', data: xData, axisLabel: { color: '#888', fontSize: 10, rotate: 30 }, axisLine: { lineStyle: { color: '#555' } }, axisPointer: { label: { show: true } } },
+      yAxis: yAxisOpt,
+      series: [
+        { name: 'Errors',   type: 'line', data: errVolData,   smooth: true, lineStyle: { width: 2, color: '#f87272' }, itemStyle: { color: '#f87272' }, symbol: 'none', areaStyle: { color: 'rgba(248,114,114,0.10)' }, markLine: stakeMarkLine },
+        { name: 'Warnings', type: 'line', data: warnVolData,  smooth: true, lineStyle: { width: 2, color: '#fbbd23' }, itemStyle: { color: '#fbbd23' }, symbol: 'none', areaStyle: { color: 'rgba(251,189,35,0.08)' } },
+        { name: 'Info',     type: 'line', data: infoVolData,   smooth: true, lineStyle: { width: 2, color: '#3abff8' }, itemStyle: { color: '#3abff8' }, symbol: 'none', areaStyle: { color: 'rgba(58,191,248,0.08)' } },
+        { name: 'Debug',    type: 'line', data: debugVolData,  smooth: true, lineStyle: { width: 1, color: '#6b7280', type: 'dashed' }, itemStyle: { color: '#6b7280' }, symbol: 'none' }
       ]
     });
   }
@@ -1118,6 +1308,23 @@
   function escapeHtml(text) {
     var map = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'};
     return text.replace(/[&<>"']/g, m => map[m]);
+  }
+
+  function populateSessionFilter() {
+    var sessions = {};
+    for (var i = 0; i < allLogs.length; i++) {
+      var s = allLogs[i].session_tag;
+      if (s) sessions[s] = true;
+    }
+    var sel = document.getElementById('sessionFilter');
+    var cur = sel.value;
+    var opts = '<option value="">All</option>';
+    var keys = Object.keys(sessions);
+    for (var i = 0; i < keys.length; i++) {
+      var selected = keys[i] === cur ? ' selected' : '';
+      opts += '<option value="' + escapeHtml(keys[i]) + '"' + selected + '>#s:..' + escapeHtml(keys[i]) + '</option>';
+    }
+    sel.innerHTML = opts;
   }
 
   // ── Inject SVG icons into static buttons ─────────────────

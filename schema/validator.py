@@ -253,12 +253,9 @@ class SchemaValidator:
         log_event(
             logger,
             "debug" if result.valid else "warn",
-            "VALIDATION",
-            f"schema validation: {result.summary()}",
+            "MAPPING",
+            "schema validation: %s" % result.summary(),
             doc_id=doc_id,
-            table=self.table_name,
-            coercions=len(result.coercions),
-            errors=len(result.errors),
         )
 
         return result

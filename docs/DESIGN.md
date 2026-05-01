@@ -14,6 +14,8 @@ This document describes the internal architecture of the changes_worker, how dat
 - [`ATTACHMENTS.md`](ATTACHMENTS.md) -- Attachment processing: detect, fetch, upload, post-process
 - [`CLOUD_BLOB_PLAN.md`](CLOUD_BLOB_PLAN.md) -- Cloud blob storage output (S3, GCS, Azure)
 - [`ADMIN_UI.md — Transforms`](ADMIN_UI.md#transform-functions-reference-transforms) -- Transform function reference (58 built-in functions)
+- [`DESIGN_EVENTING.md`](DESIGN_EVENTING.md) -- Eventing subsystem: JS OnUpdate/OnDelete handlers, MiniRacer (V8), function editor UI
+- [`FAILURE_OPTION_OUTPUT_RDBMS.md`](FAILURE_OPTION_OUTPUT_RDBMS.md) — Failure analysis & resolutions for SOURCE → PROCESS → OUTPUT (RDBMS)
 
 ---
 
@@ -91,6 +93,7 @@ change-3 → send ─┤
   - **Delivery order is not guaranteed.** Doc 500 may arrive at the endpoint before doc 1.
   - **Partial failure creates a race condition.** If 3 of 10 tasks fail but 7 succeed, the endpoint has already received 7 docs. With `halt_on_failure=true`, the checkpoint does NOT advance, so the next cycle re-fetches the same batch and those 7 docs get **re-delivered** (at-least-once semantics).
   - **Dead letter queue is more likely to be needed.** With `halt_on_failure=false`, failed docs go to the DLQ and the checkpoint advances — no re-delivery, but no retry either.
+  - **UPSERT recommended for parallel mode.** Re-processing after partial batch failure means docs that already succeeded will be re-delivered. UPSERT handles this safely. For INSERT-only tables, use `duplicate_strategy: "skip"` (generates `INSERT … ON CONFLICT DO NOTHING`). See [FAILURE_OPTION_OUTPUT_RDBMS.md §3.12](FAILURE_OPTION_OUTPUT_RDBMS.md).
   - Does NOT support `every_n_docs` sub-batch checkpointing (checkpoint saves once after the full batch).
 
 ### Which should I use?

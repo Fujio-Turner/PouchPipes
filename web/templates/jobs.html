@@ -341,9 +341,15 @@
           <input type="checkbox" />
           <div class="collapse-title text-xs font-semibold opacity-70">Advanced</div>
           <div class="collapse-content">
+            <div class="divider text-xs opacity-60">Source</div>
             <div class="grid grid-cols-3 gap-4">
               <div>
-                <label class="label label-text text-xs font-semibold">Feed Type</label>
+                <label class="label label-text text-xs font-semibold">
+                  Feed Type
+                  <div class="tooltip tooltip-bottom inline" data-tip="How the _changes feed is consumed. longpoll/normal use polling; continuous/websocket/sse/eventsource keep a persistent connection.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
                 <select id="jbFeedType" class="select select-bordered select-sm w-full">
                   <optgroup label="Polling">
                     <option value="longpoll">Long Poll</option>
@@ -358,56 +364,106 @@
                 </select>
               </div>
               <div>
-                <label class="label label-text text-xs font-semibold">Poll Interval (sec)</label>
+                <label class="label label-text text-xs font-semibold">
+                  Poll Interval (sec)
+                  <div class="tooltip tooltip-bottom inline" data-tip="Seconds between poll requests when using longpoll or normal feed types.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
                 <input id="jbPollInterval" type="number" class="input input-bordered input-sm w-full" value="10" />
               </div>
               <div>
-                <label class="label label-text text-xs font-semibold">Heartbeat (ms)</label>
+                <label class="label label-text text-xs font-semibold">
+                  Heartbeat (ms)
+                  <div class="tooltip tooltip-bottom inline" data-tip="Server sends a heartbeat every N ms to keep the connection alive during continuous/longpoll feeds.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
                 <input id="jbHeartbeat" type="number" class="input input-bordered input-sm w-full" value="30000" />
               </div>
             </div>
             <div class="grid grid-cols-3 gap-4 mt-3">
               <div>
-                <label class="label label-text text-xs font-semibold">Timeout (ms)</label>
+                <label class="label label-text text-xs font-semibold">
+                  Timeout (ms)
+                  <div class="tooltip tooltip-bottom inline" data-tip="Maximum time in ms to wait for a _changes response before timing out. Applies to the changes feed request itself.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
                 <input id="jbTimeout" type="number" class="input input-bordered input-sm w-full" value="60000" />
               </div>
               <div>
-                <label class="label label-text text-xs font-semibold">HTTP Timeout (sec)</label>
+                <label class="label label-text text-xs font-semibold">
+                  HTTP Timeout (sec)
+                  <div class="tooltip tooltip-bottom inline" data-tip="Timeout in seconds for HTTP requests made during document fetching (e.g. bulk_get, individual doc GETs).">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
                 <input id="jbHttpTimeout" type="number" class="input input-bordered input-sm w-full" value="300" />
               </div>
               <div>
-                <label class="label label-text text-xs font-semibold">Throttle Feed (ms)</label>
+                <label class="label label-text text-xs font-semibold">
+                  Throttle Feed (ms)
+                  <div class="tooltip tooltip-bottom inline" data-tip="Minimum delay in ms between processing consecutive batches. Helps avoid overwhelming the source or output.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
                 <input id="jbThrottleFeed" type="number" class="input input-bordered input-sm w-full" value="5000" />
               </div>
             </div>
             <div class="grid grid-cols-3 gap-4 mt-3">
               <div>
-                <label class="label label-text text-xs font-semibold">Limit</label>
+                <label class="label label-text text-xs font-semibold">
+                  Limit
+                  <div class="tooltip tooltip-bottom inline" data-tip="Maximum number of changes to fetch per request. 0 = no limit (server default).">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
                 <input id="jbLimit" type="number" class="input input-bordered input-sm w-full" value="0" />
               </div>
               <div>
-                <label class="label label-text text-xs font-semibold">Flood Threshold</label>
+                <label class="label label-text text-xs font-semibold">
+                  Flood Threshold
+                  <div class="tooltip tooltip-bottom inline" data-tip="If a single poll returns more than this many changes, apply back-pressure to avoid memory issues.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
                 <input id="jbFloodThreshold" type="number" class="input input-bordered input-sm w-full" value="10000" />
               </div>
               <div>
-                <label class="label label-text text-xs font-semibold">Catchup Limit</label>
+                <label class="label label-text text-xs font-semibold">
+                  Catchup Limit
+                  <div class="tooltip tooltip-bottom inline" data-tip="In continuous mode, the max batch size used during initial catch-up before switching to real-time streaming.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
                 <input id="jbCatchupLimit" type="number" class="input input-bordered input-sm w-full" value="5000" />
               </div>
             </div>
-            <div class="flex gap-6 mt-3">
+            <div class="flex gap-6 mt-3 flex-wrap">
               <label class="label cursor-pointer gap-2">
                 <span class="label-text text-xs font-semibold">Active Only</span>
+                <div class="tooltip tooltip-bottom inline" data-tip="Only return changes for non-deleted, active document revisions.">
+                  <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                </div>
                 <input id="jbActiveOnly" type="checkbox" class="checkbox checkbox-sm" checked />
               </label>
               <label class="label cursor-pointer gap-2">
                 <span class="label-text text-xs font-semibold">Include Docs</span>
+                <div class="tooltip tooltip-bottom inline" data-tip="Include the full document body in each _changes entry. Reduces round-trips but increases payload size.">
+                  <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                </div>
                 <input id="jbIncludeDocs" type="checkbox" class="checkbox checkbox-sm" />
               </label>
               <label class="label cursor-pointer gap-2">
                 <span class="label-text text-xs font-semibold">Optimize Initial Sync</span>
+                <div class="tooltip tooltip-bottom inline" data-tip="Controls initial sync for _changes feeds with 100,000s to millions of entries. Batches/chunks the feed to prevent timeouts and memory issues during the first catch-up.">
+                  <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                </div>
                 <input id="jbOptimizeSync" type="checkbox" class="checkbox checkbox-sm" />
               </label>
             </div>
+
             <!-- Channel Filter (CouchDB, App Services, Sync Gateway only) -->
             <div id="jbChannelFilterWrap" class="hidden mt-3">
               <label class="label label-text text-xs font-semibold flex items-center gap-2">
@@ -417,6 +473,220 @@
                 </div>
               </label>
               <input type="text" id="jbChannels" class="input input-bordered input-sm w-full" placeholder="Type a channel and press Enter" />
+            </div>
+
+            <!-- Processing Settings -->
+            <div class="divider text-xs opacity-60 mt-4">Processing</div>
+            <div class="grid grid-cols-3 gap-4">
+              <div>
+                <label class="label label-text text-xs font-semibold">
+                  Max Concurrent
+                  <div class="tooltip tooltip-bottom inline" data-tip="Maximum number of documents processed in parallel. Lower values reduce memory usage; higher values increase throughput.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
+                <input id="jbMaxConcurrent" type="number" class="input input-bordered input-sm w-full" value="20" min="1" />
+              </div>
+              <div>
+                <label class="label label-text text-xs font-semibold">
+                  Batch Size
+                  <div class="tooltip tooltip-bottom inline" data-tip="Number of documents to fetch per batch from the _changes feed (get_batch_number).">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
+                <input id="jbBatchSize" type="number" class="input input-bordered input-sm w-full" value="100" min="1" />
+              </div>
+              <div>
+                <label class="label label-text text-xs font-semibold">
+                  Since
+                  <div class="tooltip tooltip-bottom inline" data-tip="Starting sequence ID for the _changes feed. Use '0' to start from the beginning, or a specific sequence to resume.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
+                <input id="jbSince" type="text" class="input input-bordered input-sm w-full" value="0" placeholder="0" />
+              </div>
+            </div>
+            <div class="flex gap-6 mt-3 flex-wrap">
+              <label class="label cursor-pointer gap-2">
+                <span class="label-text text-xs font-semibold">Sequential</span>
+                <div class="tooltip tooltip-bottom inline" data-tip="Process documents one at a time in order. Slower but guarantees ordering. Required for strict consistency.">
+                  <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                </div>
+                <input id="jbSequential" type="checkbox" class="checkbox checkbox-sm" />
+              </label>
+              <label class="label cursor-pointer gap-2">
+                <span class="label-text text-xs font-semibold">Ignore Deletes</span>
+                <div class="tooltip tooltip-bottom inline" data-tip="Skip processing deleted documents (_deleted=true). They will not be forwarded to the output.">
+                  <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                </div>
+                <input id="jbIgnoreDelete" type="checkbox" class="checkbox checkbox-sm" />
+              </label>
+              <label class="label cursor-pointer gap-2">
+                <span class="label-text text-xs font-semibold">Ignore Removes</span>
+                <div class="tooltip tooltip-bottom inline" data-tip="Skip processing removed documents (channel-removed events). They will not be forwarded to the output.">
+                  <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                </div>
+                <input id="jbIgnoreRemove" type="checkbox" class="checkbox checkbox-sm" />
+              </label>
+              <label class="label cursor-pointer gap-2">
+                <span class="label-text text-xs font-semibold">Halt on Failure</span>
+                <div class="tooltip tooltip-bottom inline" data-tip="Stop the pipeline on infrastructure errors. If disabled, failed documents are sent to the Dead Letter Queue instead.">
+                  <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                </div>
+                <input id="jbHaltOnFailure" type="checkbox" class="checkbox checkbox-sm" checked />
+              </label>
+              <label class="label cursor-pointer gap-2">
+                <span class="label-text text-xs font-semibold">Dry Run</span>
+                <div class="tooltip tooltip-bottom inline" data-tip="Process documents without writing to the output. Useful for testing mappings and pipeline behavior.">
+                  <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                </div>
+                <input id="jbProcessingDryRun" type="checkbox" class="checkbox checkbox-sm" />
+              </label>
+            </div>
+
+            <!-- Retry Settings -->
+            <div class="divider text-xs opacity-60 mt-4">Retry</div>
+            <div class="grid grid-cols-3 gap-4">
+              <div>
+                <label class="label label-text text-xs font-semibold">
+                  Max Retries
+                  <div class="tooltip tooltip-bottom inline" data-tip="Maximum number of retry attempts for failed output operations before giving up or sending to DLQ.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
+                <input id="jbMaxRetries" type="number" class="input input-bordered input-sm w-full" value="5" min="0" />
+              </div>
+              <div>
+                <label class="label label-text text-xs font-semibold">
+                  Backoff Base (sec)
+                  <div class="tooltip tooltip-bottom inline" data-tip="Base delay in seconds for exponential backoff between retries. Each subsequent retry doubles the delay.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
+                <input id="jbBackoffBase" type="number" class="input input-bordered input-sm w-full" value="1" min="0" step="0.5" />
+              </div>
+              <div>
+                <label class="label label-text text-xs font-semibold">
+                  Backoff Max (sec)
+                  <div class="tooltip tooltip-bottom inline" data-tip="Maximum delay in seconds for exponential backoff. Retries will never wait longer than this.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
+                <input id="jbBackoffMax" type="number" class="input input-bordered input-sm w-full" value="60" min="1" />
+              </div>
+            </div>
+
+            <!-- Checkpoint Settings -->
+            <div class="divider text-xs opacity-60 mt-4">Checkpoint</div>
+            <div class="grid grid-cols-3 gap-4">
+              <div>
+                <label class="label label-text text-xs font-semibold">
+                  Every N Docs
+                  <div class="tooltip tooltip-bottom inline" data-tip="Save a checkpoint every N documents processed. 0 = checkpoint only at the end of each batch.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
+                <input id="jbCheckpointEveryN" type="number" class="input input-bordered input-sm w-full" value="0" min="0" />
+              </div>
+              <div>
+                <label class="label cursor-pointer gap-2 mt-6">
+                  <span class="label-text text-xs font-semibold">Checkpoint Enabled</span>
+                  <div class="tooltip tooltip-bottom inline" data-tip="Enable checkpointing to track the last processed sequence. Allows the job to resume from where it left off.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                  <input id="jbCheckpointEnabled" type="checkbox" class="checkbox checkbox-sm" checked />
+                </label>
+              </div>
+            </div>
+
+            <!-- Output Settings -->
+            <div class="divider text-xs opacity-60 mt-4">Output</div>
+
+            <!-- Dead Letter Queue Settings -->
+            <div class="divider text-xs opacity-60 mt-4">Dead Letter Queue (DLQ)</div>
+            <div class="grid grid-cols-3 gap-4">
+              <div>
+                <label class="label label-text text-xs font-semibold">
+                  Data Error Action
+                  <div class="tooltip tooltip-bottom inline" data-tip="Action for permanent data errors (e.g. mapping failures). 'dlq' stores the failed doc for later replay; 'skip' drops it.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
+                <select id="jbDataErrorAction" class="select select-bordered select-sm w-full">
+                  <option value="dlq">DLQ (store for replay)</option>
+                  <option value="skip">Skip (drop)</option>
+                </select>
+              </div>
+              <div>
+                <label class="label label-text text-xs font-semibold">
+                  Retention (sec)
+                  <div class="tooltip tooltip-bottom inline" data-tip="TTL for DLQ entries in seconds. Entries older than this are purged. 0 = keep forever. Default: 86400 (24h).">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
+                <input id="jbDlqRetention" type="number" class="input input-bordered input-sm w-full" value="86400" min="0" />
+              </div>
+              <div>
+                <label class="label label-text text-xs font-semibold">
+                  Max Replay Attempts
+                  <div class="tooltip tooltip-bottom inline" data-tip="Maximum times to retry replaying a DLQ entry before marking it as a poison pill and skipping.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
+                <input id="jbDlqMaxReplay" type="number" class="input input-bordered input-sm w-full" value="10" min="0" />
+              </div>
+            </div>
+            <div class="grid grid-cols-3 gap-4 mt-3">
+              <div>
+                <label class="label label-text text-xs font-semibold">
+                  Dead Letter Path
+                  <div class="tooltip tooltip-bottom inline" data-tip="File path for JSONL fallback DLQ storage (e.g. failed_docs.jsonl). Used when CBL-based DLQ is not available.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
+                <input id="jbDeadLetterPath" type="text" class="input input-bordered input-sm w-full" value="failed_docs.jsonl" placeholder="failed_docs.jsonl" />
+              </div>
+              <div>
+                <label class="label cursor-pointer gap-2 mt-6">
+                  <span class="label-text text-xs font-semibold">DLQ on Shutdown</span>
+                  <div class="tooltip tooltip-bottom inline" data-tip="Route all in-flight documents to the DLQ during a graceful shutdown (SIGTERM). Prevents data loss at the cost of replaying those docs later.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                  <input id="jbDlqOnShutdown" type="checkbox" class="checkbox checkbox-sm" />
+                </label>
+              </div>
+            </div>
+
+            <!-- Recursion Guard Settings -->
+            <div class="divider text-xs opacity-60 mt-4">Recursion Guard</div>
+            <div class="flex gap-6 mb-3 flex-wrap">
+              <label class="label cursor-pointer gap-2">
+                <span class="label-text text-xs font-semibold">Enabled</span>
+                <div class="tooltip tooltip-bottom inline" data-tip="Enable write-back echo suppression. When the pipeline PUTs a document back to the source, the resulting _changes echo is detected and skipped to prevent infinite recursion loops.">
+                  <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                </div>
+                <input id="jbRecursionGuardEnabled" type="checkbox" class="checkbox checkbox-sm" />
+              </label>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label class="label label-text text-xs font-semibold">
+                  Max Tracked Docs
+                  <div class="tooltip tooltip-bottom inline" data-tip="Maximum number of document IDs to track in the in-memory LRU cache. When exceeded, the oldest entries are evicted. Default: 50,000.">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
+                <input id="jbRecursionMaxDocs" type="number" class="input input-bordered input-sm w-full" value="50000" min="100" max="1000000" />
+              </div>
+              <div>
+                <label class="label label-text text-xs font-semibold">
+                  TTL (seconds)
+                  <div class="tooltip tooltip-bottom inline" data-tip="Time-to-live for tracked entries. Entries older than this are expired automatically. Default: 300 (5 minutes).">
+                    <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                  </div>
+                </label>
+                <input id="jbRecursionTtl" type="number" class="input input-bordered input-sm w-full" value="300" min="10" max="86400" />
+              </div>
             </div>
           </div>
         </div>
@@ -472,6 +742,7 @@
 
   <!-- Sidebar -->
   <script src="/static/js/sidebar.js"></script>
+  <script src="/static/js/source-test.js"></script>
 
   <!-- Jobs Page Script -->
   <script>
@@ -510,7 +781,9 @@
 
     function showToast(message, type) {
       var container = document.getElementById('toastContainer');
-      var alertClass = type === 'success' ? 'alert-success' : 'alert-error';
+      var alertClass = type === 'success' ? 'alert-success'
+        : type === 'warning' ? 'alert-warning'
+        : 'alert-error';
       var toast = document.createElement('div');
       toast.className = 'alert ' + alertClass;
       toast.innerHTML = '<span>' + message + '</span>';
@@ -700,6 +973,41 @@
       sel.value = '';
       var embOpt = sel.querySelector('option[value="__embedded__"]');
       if (embOpt) embOpt.remove();
+      // Reset advanced fields to defaults
+      document.getElementById('jbFeedType').value = 'longpoll';
+      document.getElementById('jbPollInterval').value = 10;
+      document.getElementById('jbHeartbeat').value = 30000;
+      document.getElementById('jbTimeout').value = 60000;
+      document.getElementById('jbHttpTimeout').value = 300;
+      document.getElementById('jbThrottleFeed').value = 5000;
+      document.getElementById('jbLimit').value = 0;
+      document.getElementById('jbFloodThreshold').value = 10000;
+      document.getElementById('jbCatchupLimit').value = 5000;
+      document.getElementById('jbActiveOnly').checked = true;
+      document.getElementById('jbIncludeDocs').checked = false;
+      document.getElementById('jbOptimizeSync').checked = false;
+      document.getElementById('jbSince').value = '0';
+      document.getElementById('jbSequential').checked = false;
+      document.getElementById('jbIgnoreDelete').checked = false;
+      document.getElementById('jbIgnoreRemove').checked = false;
+      document.getElementById('jbMaxConcurrent').value = 20;
+      document.getElementById('jbProcessingDryRun').checked = false;
+      document.getElementById('jbBatchSize').value = 100;
+      document.getElementById('jbHaltOnFailure').checked = true;
+      document.getElementById('jbMaxRetries').value = 5;
+      document.getElementById('jbBackoffBase').value = 1;
+      document.getElementById('jbBackoffMax').value = 60;
+      document.getElementById('jbCheckpointEnabled').checked = true;
+      document.getElementById('jbCheckpointEveryN').value = 0;
+      document.getElementById('jbDataErrorAction').value = 'dlq';
+      document.getElementById('jbDeadLetterPath').value = 'failed_docs.jsonl';
+      document.getElementById('jbDlqRetention').value = 86400;
+      document.getElementById('jbDlqMaxReplay').value = 10;
+      document.getElementById('jbDlqOnShutdown').checked = false;
+      // Reset recursion guard
+      document.getElementById('jbRecursionGuardEnabled').checked = false;
+      document.getElementById('jbRecursionMaxDocs').value = 50000;
+      document.getElementById('jbRecursionTtl').value = 300;
       // Reset dry run
       document.getElementById('jbDryRunResults').classList.add('hidden');
       document.getElementById('jbDryRunEmpty').classList.remove('hidden');
@@ -811,46 +1119,16 @@
       window.open('/inputs', '_blank');
     }
 
+    // Delegates to /static/js/source-test.js so the test-connection
+    // behaviour matches the inputs.html page (success / "no_docs" warning /
+    // error path).
     function jbTestSourceConn(inputId) {
-      // Find the full input config from allInputs cache
       var inp = allInputs.find(function(i){ return i.id === inputId; });
       if (!inp) { alert('Input "' + inputId + '" not found in cache.'); return; }
-
-      var payload = {
-        gateway: {
-          url: inp.host || inp.url || '',
-          database: inp.database || '',
-          scope: inp.scope || '_default',
-          collection: inp.collection || '_default',
-          src: inp.source_type || 'sync_gateway',
-          accept_self_signed_certs: inp.accept_self_signed_certs || false,
-          compress: inp.compress || false
-        },
-        auth: inp.auth || { method: 'none' }
-      };
-
-      fetch('/api/wizard/test-source', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      })
-      .then(function(r){ return r.json(); })
-      .then(function(data){
-        var urlTested = payload.gateway.url + '/' + payload.gateway.database;
-        if (payload.gateway.scope && payload.gateway.scope !== '_default') {
-          urlTested += '.' + payload.gateway.scope;
-        }
-        if (payload.gateway.collection && payload.gateway.collection !== '_default') {
-          urlTested += '.' + payload.gateway.collection;
-        }
-        var authInfo = (payload.auth.method || 'none').toUpperCase();
-        if (data.error) {
-          alert('✕ Connection failed\n\nURL: ' + urlTested + '/_changes\nAuth: ' + authInfo + '\nError: ' + data.error);
-        } else {
-          alert('✓ Connection successful\n\nURL: ' + urlTested + '/_changes\nAuth: ' + authInfo + '\nDocs found: ' + (data.total || 0));
-        }
-      })
-      .catch(function(err){ alert('Test error: ' + err.message); });
+      SourceTest.test({
+        payload: SourceTest.buildPayloadFromInput(inp),
+        label: inputId
+      });
     }
 
     function jbEditSource(inputId) {
@@ -1514,7 +1792,43 @@
         active_only: document.getElementById('jbActiveOnly').checked,
         include_docs: document.getElementById('jbIncludeDocs').checked,
         optimize_initial_sync: document.getElementById('jbOptimizeSync').checked,
+        since: document.getElementById('jbSince').value || '0',
         channels: jbChannelsTagify.value.map(function(t) { return t.value; })
+      };
+
+      var processing = {
+        sequential: document.getElementById('jbSequential').checked,
+        ignore_delete: document.getElementById('jbIgnoreDelete').checked,
+        ignore_remove: document.getElementById('jbIgnoreRemove').checked,
+        max_concurrent: parseInt(document.getElementById('jbMaxConcurrent').value, 10) || 20,
+        dry_run: document.getElementById('jbProcessingDryRun').checked,
+        get_batch_number: parseInt(document.getElementById('jbBatchSize').value, 10) || 100,
+        halt_on_failure: document.getElementById('jbHaltOnFailure').checked
+      };
+
+      var retry = {
+        max_retries: parseInt(document.getElementById('jbMaxRetries').value, 10) || 5,
+        backoff_base_seconds: parseFloat(document.getElementById('jbBackoffBase').value) || 1,
+        backoff_max_seconds: parseInt(document.getElementById('jbBackoffMax').value, 10) || 60
+      };
+
+      var checkpoint = {
+        enabled: document.getElementById('jbCheckpointEnabled').checked,
+        every_n_docs: parseInt(document.getElementById('jbCheckpointEveryN').value, 10) || 0
+      };
+
+      var dlq = {
+        data_error_action: document.getElementById('jbDataErrorAction').value,
+        dead_letter_path: document.getElementById('jbDeadLetterPath').value || 'failed_docs.jsonl',
+        retention_seconds: parseInt(document.getElementById('jbDlqRetention').value, 10) || 86400,
+        max_replay_attempts: parseInt(document.getElementById('jbDlqMaxReplay').value, 10) || 10,
+        dlq_inflight_on_shutdown: document.getElementById('jbDlqOnShutdown').checked
+      };
+
+      var recursionGuard = {
+        enabled: document.getElementById('jbRecursionGuardEnabled').checked,
+        max_tracked_docs: parseInt(document.getElementById('jbRecursionMaxDocs').value, 10) || 50000,
+        ttl_seconds: parseInt(document.getElementById('jbRecursionTtl').value, 10) || 300
       };
 
       var payload = {
@@ -1524,9 +1838,14 @@
         output_id: currentJobBuilder.outputId,
         output_type: currentJobBuilder.outputType,
         changes_feed: changesFeed,
+        recursion_guard: recursionGuard,
         system: {
           threads: threads,
-          attachments_enabled: attachmentsEnabled
+          attachments_enabled: attachmentsEnabled,
+          processing: processing,
+          retry: retry,
+          checkpoint: checkpoint,
+          dlq: dlq
         }
       };
 
@@ -1679,6 +1998,68 @@
           document.getElementById('jbActiveOnly').checked = !!cf.active_only;
           document.getElementById('jbIncludeDocs').checked = !!cf.include_docs;
           document.getElementById('jbOptimizeSync').checked = !!cf.optimize_initial_sync;
+          if (cf.since != null) {
+            document.getElementById('jbSince').value = cf.since;
+          }
+
+          // Populate processing fields
+          var proc = sys.processing || {};
+          document.getElementById('jbSequential').checked = !!proc.sequential;
+          document.getElementById('jbIgnoreDelete').checked = !!proc.ignore_delete;
+          document.getElementById('jbIgnoreRemove').checked = !!proc.ignore_remove;
+          if (proc.max_concurrent != null) {
+            document.getElementById('jbMaxConcurrent').value = proc.max_concurrent;
+          }
+          document.getElementById('jbProcessingDryRun').checked = !!proc.dry_run;
+          if (proc.get_batch_number != null) {
+            document.getElementById('jbBatchSize').value = proc.get_batch_number;
+          }
+          document.getElementById('jbHaltOnFailure').checked = proc.halt_on_failure !== false;
+
+          // Populate retry fields
+          var retryConf = sys.retry || {};
+          if (retryConf.max_retries != null) {
+            document.getElementById('jbMaxRetries').value = retryConf.max_retries;
+          }
+          if (retryConf.backoff_base_seconds != null) {
+            document.getElementById('jbBackoffBase').value = retryConf.backoff_base_seconds;
+          }
+          if (retryConf.backoff_max_seconds != null) {
+            document.getElementById('jbBackoffMax').value = retryConf.backoff_max_seconds;
+          }
+
+          // Populate checkpoint fields
+          var ckpt = sys.checkpoint || {};
+          document.getElementById('jbCheckpointEnabled').checked = ckpt.enabled !== false;
+          if (ckpt.every_n_docs != null) {
+            document.getElementById('jbCheckpointEveryN').value = ckpt.every_n_docs;
+          }
+
+          // Populate DLQ fields
+          var dlqConf = sys.dlq || {};
+          if (dlqConf.data_error_action) {
+            document.getElementById('jbDataErrorAction').value = dlqConf.data_error_action;
+          }
+          if (dlqConf.dead_letter_path != null) {
+            document.getElementById('jbDeadLetterPath').value = dlqConf.dead_letter_path;
+          }
+          if (dlqConf.retention_seconds != null) {
+            document.getElementById('jbDlqRetention').value = dlqConf.retention_seconds;
+          }
+          if (dlqConf.max_replay_attempts != null) {
+            document.getElementById('jbDlqMaxReplay').value = dlqConf.max_replay_attempts;
+          }
+          document.getElementById('jbDlqOnShutdown').checked = !!dlqConf.dlq_inflight_on_shutdown;
+
+          // Populate recursion guard fields
+          var rgConf = job.recursion_guard || {};
+          document.getElementById('jbRecursionGuardEnabled').checked = !!rgConf.enabled;
+          if (rgConf.max_tracked_docs != null) {
+            document.getElementById('jbRecursionMaxDocs').value = rgConf.max_tracked_docs;
+          }
+          if (rgConf.ttl_seconds != null) {
+            document.getElementById('jbRecursionTtl').value = rgConf.ttl_seconds;
+          }
 
           // Populate channels and show/hide filter
           jbChannelsTagify.removeAllTags();

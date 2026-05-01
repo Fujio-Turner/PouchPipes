@@ -7,6 +7,7 @@ This document covers the practical implementation of writing `_changes` feed doc
 **Related docs:**
 - [`DESIGN.md`](DESIGN.md) -- Pipeline architecture, failure modes, checkpoint strategy
 - [`ADMIN_UI.md`](ADMIN_UI.md) -- Config editor with DB output fields, Schema Mappings visual editor
+- [`FAILURE_OPTION_OUTPUT_RDBMS.md`](FAILURE_OPTION_OUTPUT_RDBMS.md) -- Failure analysis & resolutions for RDBMS output error handling
 
 ---
 
@@ -609,7 +610,7 @@ Child tables are deleted **before** the parent to satisfy foreign key constraint
 
 ## Error Handling
 
-RDBMS writes follow the same failure semantics as HTTP output (see [`DESIGN.md`](DESIGN.md)):
+RDBMS writes follow the same failure semantics as HTTP output (see [`DESIGN.md`](DESIGN.md)). For comprehensive failure analysis and resolutions, see [`FAILURE_OPTION_OUTPUT_RDBMS.md`](FAILURE_OPTION_OUTPUT_RDBMS.md).
 
 | Error | `halt_on_failure=true` | `halt_on_failure=false` |
 |---|---|---|
@@ -617,8 +618,50 @@ RDBMS writes follow the same failure semantics as HTTP output (see [`DESIGN.md`]
 | Constraint violation (FK, unique, check) | Stop, hold checkpoint | DLQ, skip |
 | Transaction deadlock | Retry with backoff, then stop | Retry, then DLQ |
 | Type mismatch (e.g., string in INT column) | Stop, hold checkpoint | DLQ, skip |
+| Pool exhaustion (`53300`) | Retry with existing pool (no reconnect), then stop | Retry with existing pool, then DLQ |
+| Table not found (`42P01`) | Retry with reconnect; after N retries → DLQ | Retry with reconnect; after N retries → DLQ |
 
 **The transaction guarantee means no partial writes.** If any statement within the transaction fails, the entire transaction rolls back. The RDBMS is never left in an inconsistent state.
+
+**Row-by-row fallback for multi-op failures:** When a non-transient error (constraint, data type) occurs in a multi-op transaction, `_execute_ops` falls back to row-by-row execution to isolate which specific rows failed. The DLQ entry includes per-row error details (`error_class: "partial"`, `failed_ops: [...]`). Single-op docs are unaffected. See [§3.15](FAILURE_OPTION_OUTPUT_RDBMS.md).
+
+**`duplicate_strategy: "skip"`:** Mapping config option that generates `INSERT … ON CONFLICT DO NOTHING` instead of bare `INSERT`. Recommended for parallel mode (`sequential: false`) to safely handle re-processing after batch failures. See [§3.12](FAILURE_OPTION_OUTPUT_RDBMS.md).
+
+---
+
+## Error Classification
+
+Each RDBMS engine classifies SQL errors as **transient** (retry with exponential backoff) or **permanent** (send to DLQ immediately). This classification determines whether `halt_on_failure` applies and whether the pipeline retries the operation.
+
+### Classification summary
+
+| Error class | Transient? | PostgreSQL | MySQL | MSSQL | Oracle |
+|---|---|---|---|---|---|
+| `connection` | ✅ | 08xxx | 2002-2055, 1158-1161 | -1, 53, 64, 233, 10053-10061 | 3113, 3114, 3135, 12xxx |
+| `timeout` | ✅ | (Python exc) | (Python exc) | 2, 258 | 12170 |
+| `deadlock` | ✅ | 40001, 40P01 | 1205, 1213 | 1205 | 60 |
+| `lock_contention` | ✅ | 55P03 | 1206 | 1222 | 54, 4021 |
+| `resource_exhaustion` | ✅ | 53xxx | 1021, 1037-1041, 1114 | 701, 10928-10929, 40501, 49918-49920 | 20, 4031 |
+| `server_shutdown` | ✅ | 57P01-57P03 | 1053 | 40197, 40613 | 1033, 1034, 1089 |
+| `table_not_found` | ✅ | 42P01 | 1146 | 208 | 942 |
+| `serialization` | ✅ | 40001 | — | — | 8177, 1555 |
+| `constraint_violation` | ❌ | 23xxx | 1062, 1451, 1452, 1048... | 2601, 2627, 515, 547... | 1, 2290-2292, 1400... |
+| `data_type` | ❌ | 22xxx | 1264, 1366, 1292... | 245, 8114, 8115... | 1722, 1858, 1861... |
+| `syntax_or_schema` | ❌ | 42xxx (not 42P01) | 1054, 1064 | 207, 102 | 903, 904 |
+| `auth_failure` | ❌ | 28xxx, 42501 | 1044, 1045, 1142 | 229, 18456 | 1017, 1031, 28000 |
+| `invalid_database` | ❌ | 3D000, 3F000 | 1046, 1049 | 4060 | 12154, 12505, 12514 |
+
+### Behavior by classification
+
+- **Transient errors** are retried with exponential backoff (configurable via `retry.max_retries`, `retry.backoff_base_seconds`, `retry.backoff_max_seconds`). If all retries exhaust:
+  - `halt_on_failure: true` → raises `OutputEndpointDown`, stops the batch, holds the checkpoint
+  - `halt_on_failure: false` → returns `{ok: false}`, writes to DLQ, advances checkpoint
+
+- **Permanent errors** skip the retry loop entirely and return `{ok: false}` immediately. The `data_error_action` config controls whether they go to the DLQ (`"dlq"`) or are silently dropped (`"skip"`). `halt_on_failure` does **not** apply to permanent errors.
+
+### Why "table not found" is transient
+
+A dropped table CAN come back — schema migrations, maintenance windows, and operational `DROP/CREATE` sequences are common. With `halt_on_failure: true`, the pipeline retries with backoff and once the table is recreated, writes succeed without manual intervention or data loss. The checkpoint is held, so no documents are skipped.
 
 ---
 

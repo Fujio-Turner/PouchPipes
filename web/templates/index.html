@@ -569,6 +569,8 @@ var chartHistory = {
   outErrors: [],
   outSkipped: [],
   deadLetters: [],
+  dbRetries: [],
+  dbReconnects: [],
   avgPollTime: [],
   avgProcessTime: [],
   avgOutputTime: [],
@@ -606,6 +608,8 @@ function pushHistory(m) {
     ['outErrors',       'changes_worker_output_errors_total'],
     ['outSkipped',      'changes_worker_output_skipped_total'],
     ['deadLetters',     'changes_worker_dead_letter_total'],
+    ['dbRetries',       'changes_worker_db_retries_total'],
+    ['dbReconnects',    'changes_worker_db_pool_reconnects_total'],
     ['deletesForwarded','changes_worker_deletes_forwarded_total']
   ];
   for (var i = 0; i < keys.length; i++) {
@@ -1079,7 +1083,8 @@ function updateArchData(m) {
   }
 
   // DLQ node
-  setText('archDlqStat', fmt(dlq) + ' doc' + (dlq !== 1 ? 's' : ''));
+  var dlqPending = m ? (m['changes_worker_dlq_pending_count'] || 0) : 0;
+  setText('archDlqStat', fmt(dlqPending) + ' pending' + (dlq > 0 ? ' · ' + fmt(dlq) + ' total' : ''));
 
   // Hover tooltips — concise summary info
   var feedRate = archRates.feed > 0 ? (archRates.feed < 1 ? archRates.feed.toFixed(1) : fmt(archRates.feed)) + ' docs/s' : 'idle';
@@ -1102,9 +1107,16 @@ function updateArchData(m) {
   document.getElementById('archTipHttp').innerHTML = outMode === 'http' ? outTip : 'Not active';
   document.getElementById('archTipDb').innerHTML   = outMode === 'db'   ? outTip : 'Not active';
   document.getElementById('archTipS3').innerHTML   = outMode === 's3'   ? outTip : 'Not active';
+  var dlqPendingTip = m ? (m['changes_worker_dlq_pending_count'] || 0) : 0;
+  var dbRetries = m ? (m['changes_worker_db_retries_total'] || 0) : 0;
+  var dbExhausted = m ? (m['changes_worker_db_retry_exhausted_total'] || 0) : 0;
+  var dbReconnects = m ? (m['changes_worker_db_pool_reconnects_total'] || 0) : 0;
+  var lastIncidentAgo = cachedDlqMeta.last_inserted_at ? fmtAgo(cachedDlqMeta.last_inserted_at) : 'never';
   document.getElementById('archTipDlq').innerHTML =
-    'Dead Letters: <b>' + fmt(dlq) + '</b><br>' +
-    'Last Insert: <b>' + fmtEpoch(cachedDlqMeta.last_inserted_at) + '</b><br>' +
+    'Pending: <b>' + fmt(dlqPendingTip) + '</b> · Total: <b>' + fmt(dlq) + '</b><br>' +
+    'DB Retries: <b>' + fmt(dbRetries) + '</b> · Exhausted: <b>' + fmt(dbExhausted) + '</b><br>' +
+    'Pool Reconnects: <b>' + fmt(dbReconnects) + '</b><br>' +
+    'Last Incident: <b>' + lastIncidentAgo + '</b><br>' +
     'Last Drain: <b>' + fmtEpoch(cachedDlqMeta.last_drained_at) + '</b><br>' +
     'Review at <b>/api/dlq</b>';
   document.getElementById('archTipAttach').innerHTML = attachEnabled
@@ -1179,27 +1191,43 @@ function showArchDetail(which) {
   } else if (which === 'dlq') {
     title = 'Dead Letter Queue';
     color = '#d32f2f';
+    var dlqPendingModal = m['changes_worker_dlq_pending_count'] || 0;
+    var dbRetriesModal = m['changes_worker_db_retries_total'] || 0;
+    var dbExhaustedModal = m['changes_worker_db_retry_exhausted_total'] || 0;
+    var dbTransientModal = m['changes_worker_db_transient_errors_total'] || 0;
+    var dbPermanentModal = m['changes_worker_db_permanent_errors_total'] || 0;
+    var dbReconnectsModal = m['changes_worker_db_pool_reconnects_total'] || 0;
+    var lastIncident = cachedDlqMeta.last_inserted_at ? fmtAgo(cachedDlqMeta.last_inserted_at) : 'never';
     rows = [
-      ['Dead Letters', fmt(dlq)],
+      ['Pending (current)', fmt(dlqPendingModal)],
+      ['Total (cumulative)', fmt(dlq)],
+      ['Last Incident', lastIncident],
       ['Last Inserted', fmtEpoch(cachedDlqMeta.last_inserted_at)],
       ['Insert Job', cachedDlqMeta.last_inserted_job || '--'],
       ['Last Drained', fmtEpoch(cachedDlqMeta.last_drained_at)],
       ['Drain Job', cachedDlqMeta.last_drained_job || '--'],
+      ['DB Retries', fmt(dbRetriesModal)],
+      ['Retry Exhausted', fmt(dbExhaustedModal)],
+      ['Pool Reconnects', fmt(dbReconnectsModal)],
+      ['Transient Errors', fmt(dbTransientModal)],
+      ['Permanent Errors', fmt(dbPermanentModal)],
       ['Output Errors', fmt(outErr)],
       ['Output Success', fmt(outOk)],
-      ['Retries', fmt(retries)],
       ['Uptime', fmtUptime(uptime)]
     ];
     // Chart 1: pie — success vs errors vs DLQ
     chart1Opt = pieOpt('Output Outcomes', [
       { name: 'Success', value: outOk, itemStyle: { color: '#36d399' } },
       { name: 'Errors', value: outErr, itemStyle: { color: '#f87272' } },
-      { name: 'Dead Letters', value: dlq, itemStyle: { color: '#d32f2f' } }
+      { name: 'Dead Letters', value: dlqPendingModal, itemStyle: { color: '#d32f2f' } },
+      { name: 'Retries', value: dbRetriesModal, itemStyle: { color: '#ffa726' } }
     ]);
-    // Chart 2: line — dead letter history
-    chart2Opt = lineOpt('Dead Letters Over Time', [
-      lineSeries('Dead Letters', chartHistory.deadLetters, '#d32f2f'),
-      lineSeries('Errors', chartHistory.outErrors, c.red)
+    // Chart 2: line — DLQ depth + retry activity over time
+    chart2Opt = lineOpt('DLQ & Retry Activity Over Time', [
+      lineSeries('DLQ Rate', chartHistory.deadLetters, '#d32f2f'),
+      lineSeries('Errors', chartHistory.outErrors, c.red),
+      lineSeries('DB Retries', chartHistory.dbRetries, '#ffa726'),
+      lineSeries('Pool Reconnects', chartHistory.dbReconnects, '#42a5f5')
     ]);
   } else if (which === 'work') {
     title = 'changes_worker — Processing';
@@ -2177,6 +2205,18 @@ function fmtEpoch(epoch) {
   } catch(e) { return 'never'; }
 }
 
+function fmtAgo(epoch) {
+  if (!epoch) return 'never';
+  try {
+    var diff = (Date.now() / 1000) - epoch;
+    if (diff < 0) return 'just now';
+    if (diff < 60) return Math.floor(diff) + 's ago';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+    return Math.floor(diff / 86400) + 'd ago';
+  } catch(e) { return 'never'; }
+}
+
 function loadDlqMeta() {
   fetch('/api/dlq/meta')
     .then(function(res) { return res.ok ? res.json() : null; })
@@ -2193,7 +2233,7 @@ function setUnknown() {
   // Push zero-value data points so charts still render with flat lines
   chartHistory.labels.push(timeLabel());
   if (chartHistory.labels.length > MAX_POINTS) chartHistory.labels.shift();
-  var hKeys = ['changesReceived','pollErrors','processed','filtered','outSuccess','outErrors','outSkipped','deadLetters'];
+  var hKeys = ['changesReceived','pollErrors','processed','filtered','outSuccess','outErrors','outSkipped','deadLetters','dbRetries'];
   for (var i = 0; i < hKeys.length; i++) {
     chartHistory[hKeys[i]].push(0);
     if (chartHistory[hKeys[i]].length > MAX_POINTS) chartHistory[hKeys[i]].shift();
@@ -2457,7 +2497,7 @@ document.addEventListener('DOMContentLoaded', function() {
   loadDlqMeta();
   loadJobStatus();
   setInterval(loadMetrics, 5000);
-  setInterval(loadDlqMeta, 15000);
+  setInterval(loadDlqMeta, 30000);
   setInterval(loadCBLStatus, 30000);
   setInterval(loadJobStatus, 10000);
 });

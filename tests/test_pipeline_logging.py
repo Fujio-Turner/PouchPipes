@@ -343,9 +343,12 @@ class TestRedactingFormatter(unittest.TestCase):
         return record
 
     def test_formats_with_log_key_prefix(self):
-        fmt = pl.RedactingFormatter(pl.Redactor("none"), fmt="%(message)s")
+        fmt = pl.RedactingFormatter(
+            pl.Redactor("none"), fmt="[%(levelname)s] %(message)s"
+        )
         record = self._make_record("hello", log_key="CHANGES")
         result = fmt.format(record)
+        # [CHANGES] is inserted right after [LEVEL] in the prefix
         self.assertIn("[CHANGES]", result)
         self.assertIn("hello", result)
 
@@ -353,8 +356,10 @@ class TestRedactingFormatter(unittest.TestCase):
         fmt = pl.RedactingFormatter(pl.Redactor("none"), fmt="%(message)s")
         record = self._make_record("hello", doc_id="doc1", seq="42")
         result = fmt.format(record)
-        self.assertIn("doc_id=doc1", result)
-        self.assertIn("seq=42", result)
+        # Fields are now pipe-delimited: | doc_id doc1 | seq 42
+        self.assertIn("doc_id doc1", result)
+        self.assertIn("seq 42", result)
+        self.assertIn("|", result)
 
     def test_redacts_url_field(self):
         fmt = pl.RedactingFormatter(pl.Redactor("partial"), fmt="%(message)s")
@@ -380,7 +385,9 @@ class TestRedactingFormatter(unittest.TestCase):
         fmt = pl.RedactingFormatter(pl.Redactor("none"), fmt="%(message)s")
         record = self._make_record("op test", operation="INSERT")
         result = fmt.format(record)
-        self.assertIn("operation=INSERT", result)
+        # The formatter renders the `operation` extra under its short alias `op`
+        # using a space separator: "op INSERT".
+        self.assertIn("op INSERT", result)
 
 
 # ===================================================================
@@ -449,6 +456,7 @@ class TestConfigureLogging(unittest.TestCase):
             }
             pl.configure_logging(cfg)
             # Real handlers are behind the QueueListener.
+            # log_level=info creates 2 file tiers: _info + _error
             listener = pl._queue_listener
             self.assertIsNotNone(listener)
             file_handlers = [
@@ -456,7 +464,7 @@ class TestConfigureLogging(unittest.TestCase):
                 for h in listener.handlers
                 if isinstance(h, pl.ManagedRotatingFileHandler)
             ]
-            self.assertEqual(len(file_handlers), 1)
+            self.assertEqual(len(file_handlers), 2)
             for h in listener.handlers:
                 h.close()
             listener.stop()
@@ -480,9 +488,11 @@ class TestConfigureLogging(unittest.TestCase):
             }
             pl.configure_logging(cfg)
             # Real handlers are behind the QueueListener; root has 1 QueueHandler.
+            # log_level=debug creates 3 file tiers: _debug + _info + _error
+            # plus 1 console handler = 4 total
             listener = pl._queue_listener
             self.assertIsNotNone(listener)
-            self.assertEqual(len(listener.handlers), 2)
+            self.assertEqual(len(listener.handlers), 4)
             for h in listener.handlers:
                 h.close()
             listener.stop()

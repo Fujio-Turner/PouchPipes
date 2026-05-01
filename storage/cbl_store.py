@@ -236,7 +236,7 @@ def _coll_purge_doc(db, collection_name: str, doc_id: str) -> None:
             logger,
             "error",
             "CBL",
-            f"Failed to purge document from {collection_name}",
+            "failed to purge document from %s" % collection_name,
             doc_id=doc_id,
             collection=collection_name,
         )
@@ -296,7 +296,7 @@ def _run_n1ql(db, sql: str, params: dict | None = None) -> list[dict]:
             logger,
             "error",
             "CBL",
-            f"N1QL query failed: {type(e).__name__}: {str(e)[:200]}",
+            "N1QL query failed: %s: %s" % (type(e).__name__, str(e)[:200]),
             sql=sql[:200],
             params=str(params)[:100] if params else None,
         )
@@ -321,7 +321,7 @@ def _run_n1ql_scalar(db, sql: str, params: dict | None = None):
             logger,
             "error",
             "CBL",
-            f"N1QL scalar query failed: {type(e).__name__}: {str(e)[:200]}",
+            "N1QL scalar query failed: %s: %s" % (type(e).__name__, str(e)[:200]),
             sql=sql[:200],
             params=str(params)[:100] if params else None,
         )
@@ -343,7 +343,7 @@ def _run_n1ql_explain(db, sql: str, params: dict | None = None) -> str:
             logger,
             "error",
             "CBL",
-            f"N1QL explain failed: {type(e).__name__}: {str(e)[:200]}",
+            "N1QL explain failed: %s: %s" % (type(e).__name__, str(e)[:200]),
             sql=sql[:200],
         )
         raise RuntimeError(f"N1QL explain failed: {e}") from e
@@ -408,7 +408,7 @@ class _transaction:
                 logger,
                 "error",
                 "CBL",
-                f"Failed to end CBL transaction (commit={commit})",
+                "failed to end CBL transaction (commit=%s)" % commit,
                 error_code=err.code if err else None,
             )
             # Don't raise — the transaction state may be inconsistent
@@ -1115,7 +1115,7 @@ class CBLStore:
                 logger,
                 "warning",
                 "CBL",
-                f"Failed to load sources: {e}",
+                "failed to load sources: %s" % e,
                 operation="SELECT",
                 doc_type="source",
             )
@@ -1208,7 +1208,7 @@ class CBLStore:
                 logger,
                 "info",
                 "CBL",
-                f"cleared all sources ({len(sources)} deleted)",
+                "cleared all sources (%d deleted)" % len(sources),
                 operation="DELETE",
                 doc_type="source",
                 count=len(sources),
@@ -1218,7 +1218,7 @@ class CBLStore:
                 logger,
                 "error",
                 "CBL",
-                f"Failed to clear all sources: {e}",
+                "failed to clear all sources: %s" % e,
                 operation="DELETE",
                 doc_type="source",
             )
@@ -1356,13 +1356,10 @@ class CBLStore:
                 logger,
                 "debug",
                 "DLQ",
-                "listed page",
+                "listed page (offset=%d limit=%d filtered=%d total=%d)"
+                % (offset, limit, filtered_count, total_count),
                 operation="SELECT",
                 doc_type="dlq",
-                offset=offset,
-                limit=limit,
-                filtered=filtered_count,
-                total=total_count,
             )
             return {
                 "entries": entries,
@@ -1370,22 +1367,35 @@ class CBLStore:
                 "filtered": filtered_count,
             }
         except Exception as e:
+            err_msg = f"{type(e).__name__}: {str(e)[:200]}"
             log_event(
                 logger,
                 "error",
                 "DLQ",
-                f"Failed to list DLQ page: {type(e).__name__}: {str(e)[:200]}",
+                "failed to list DLQ page (offset=%d limit=%d): %s"
+                % (offset, limit, err_msg),
                 operation="SELECT",
                 doc_type="dlq",
-                offset=offset,
-                limit=limit,
+                error_detail=err_msg,
             )
-            # Return empty page on error
-            return {
-                "entries": [],
-                "total": 0,
-                "filtered": 0,
-            }
+            # Fall back to unpaginated list_dlq
+            try:
+                all_entries = self.list_dlq()
+                total = len(all_entries)
+                page = all_entries[offset : offset + limit]
+                return {
+                    "entries": page,
+                    "total": total,
+                    "filtered": total,
+                    "query_error": err_msg,
+                }
+            except Exception:
+                return {
+                    "entries": [],
+                    "total": 0,
+                    "filtered": 0,
+                    "query_error": err_msg,
+                }
 
     def dlq_stats(self) -> dict:
         """Return lightweight aggregation data for DLQ charts and summary cards.
@@ -1464,7 +1474,7 @@ class CBLStore:
                 logger,
                 "error",
                 "DLQ",
-                f"DLQ stats query failed: {type(e).__name__}: {str(e)[:200]}",
+                "DLQ stats query failed: %s: %s" % (type(e).__name__, str(e)[:200]),
                 operation="SELECT",
             )
             # Return empty stats on error
@@ -1506,7 +1516,7 @@ class CBLStore:
                     logger,
                     "warn",
                     "DLQ",
-                    f"doc_data is malformed JSON: {e}",
+                    "doc_data is malformed JSON: %s" % e,
                     operation="SELECT",
                     doc_id=dlq_id,
                     doc_type="dlq",
@@ -1542,7 +1552,7 @@ class CBLStore:
                 logger,
                 "error",
                 "DLQ",
-                f"Failed to get DLQ entry: {type(e).__name__}: {str(e)[:200]}",
+                "failed to get DLQ entry: %s: %s" % (type(e).__name__, str(e)[:200]),
                 operation="SELECT",
                 doc_id=dlq_id,
                 doc_type="dlq",
@@ -1584,7 +1594,7 @@ class CBLStore:
 
         log_event(
             logger,
-            "info",
+            "debug",
             "DLQ",
             "entry purged",
             operation="DELETE",
@@ -1667,7 +1677,12 @@ class CBLStore:
         return purged
 
     def get_dlq_meta(self) -> dict:
-        """Return DLQ metadata (last_inserted_at, last_drained_at as epoch)."""
+        """Return DLQ metadata (last_inserted_at, last_drained_at as epoch).
+
+        The response includes global "latest" timestamps plus a ``jobs``
+        dict keyed by job_id so each pipeline's DLQ history is preserved
+        independently.
+        """
         doc = _coll_get_doc(self.db, COLL_DLQ, "dlq:meta")
         if not doc:
             return {
@@ -1675,6 +1690,7 @@ class CBLStore:
                 "last_drained_at": None,
                 "last_inserted_job": None,
                 "last_drained_job": None,
+                "jobs": {},
             }
         props = doc.properties
         return {
@@ -1682,6 +1698,7 @@ class CBLStore:
             "last_drained_at": props.get("last_drained_at", None),
             "last_inserted_job": props.get("last_inserted_job", None),
             "last_drained_job": props.get("last_drained_job", None),
+            "jobs": props.get("jobs", {}),
         }
 
     def update_dlq_meta(self, field: str, job_id: str = "") -> None:
@@ -1689,22 +1706,37 @@ class CBLStore:
 
         Call once per batch — not per document — to avoid excessive writes.
 
+        Updates **both** the global ``last_inserted_at`` / ``last_drained_at``
+        timestamps and the per-job entry inside ``jobs.<job_id>`` so that
+        multi-pipeline deployments preserve each job's DLQ history
+        independently.
+
         Args:
             field: ``"last_inserted_at"`` or ``"last_drained_at"``.
             job_id: checkpoint client_id or other job identifier.
         """
         now = int(time.time())
         doc = _coll_get_mutable_doc(self.db, COLL_DLQ, "dlq:meta")
-        if doc:
-            doc[field] = now
-            if job_id:
-                doc[field.replace("_at", "_job")] = job_id
-        else:
+        if not doc:
             doc = MutableDocument("dlq:meta")
             doc["type"] = "dlq_meta"
-            doc[field] = now
-            if job_id:
-                doc[field.replace("_at", "_job")] = job_id
+            doc["jobs"] = {}
+
+        # Global latest (backward-compatible)
+        doc[field] = now
+        if job_id:
+            doc[field.replace("_at", "_job")] = job_id
+
+        # Per-job tracking
+        if job_id:
+            jobs = doc.get("jobs") or {}
+            if not isinstance(jobs, dict):
+                jobs = {}
+            job_entry = jobs.get(job_id, {})
+            job_entry[field] = now
+            jobs[job_id] = job_entry
+            doc["jobs"] = jobs
+
         _coll_save_doc(self.db, COLL_DLQ, doc)
         log_event(
             logger,
@@ -1925,7 +1957,7 @@ class CBLStore:
                 logger,
                 "debug",
                 "CBL",
-                f"outputs_{output_type} not found",
+                "outputs_%s not found" % output_type,
                 operation="SELECT",
                 doc_id=doc_id,
                 output_type=output_type,
@@ -1942,7 +1974,7 @@ class CBLStore:
             logger,
             "debug",
             "CBL",
-            f"outputs_{output_type} loaded",
+            "outputs_%s loaded" % output_type,
             operation="SELECT",
             doc_id=doc_id,
             output_type=output_type,
@@ -1978,7 +2010,7 @@ class CBLStore:
             logger,
             "info",
             "CBL",
-            f"outputs_{output_type} saved",
+            "outputs_%s saved" % output_type,
             operation="INSERT" if is_new else "UPDATE",
             doc_id=doc_id,
             output_type=output_type,
@@ -2173,6 +2205,12 @@ class CBLStore:
             datetime.datetime.now(datetime.timezone.utc).isoformat(),
         )
         doc["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        if "mapping" in job_data:
+            doc["mapping"] = job_data["mapping"]
+        if "eventing" in job_data:
+            doc["eventing"] = job_data["eventing"]
+        if "description" in job_data:
+            doc["description"] = job_data["description"]
         if "meta" in job_data:
             doc["meta"] = job_data["meta"]
         _coll_save_doc(self.db, COLL_JOBS, doc)
@@ -2248,7 +2286,7 @@ class CBLStore:
             logger,
             "debug",
             "CBL",
-            f"listed {len(jobs)} jobs",
+            "listed %d jobs" % len(jobs),
             operation="SELECT",
             doc_type="job",
             count=len(jobs),
@@ -2473,7 +2511,7 @@ class CBLStore:
             logger,
             "debug",
             "CBL",
-            f"listed {len(sessions)} sessions",
+            "listed %d sessions" % len(sessions),
             operation="SELECT",
             doc_type="session",
             count=len(sessions),
@@ -2509,7 +2547,7 @@ class CBLStore:
             logger,
             "info",
             "CBL",
-            f"deleted {count} expired sessions",
+            "deleted %d expired sessions" % count,
             operation="DELETE",
             doc_type="session",
             count=count,
@@ -2592,7 +2630,7 @@ class CBLStore:
             logger,
             "debug",
             "CBL",
-            f"listed {len(entries)} data quality entries",
+            "listed %d data quality entries" % len(entries),
             operation="SELECT",
             doc_type="data_quality",
             job_id=job_id,
@@ -2670,7 +2708,7 @@ class CBLStore:
             logger,
             "debug",
             "CBL",
-            f"listed {len(enrichments)} enrichments",
+            "listed %d enrichments" % len(enrichments),
             operation="SELECT",
             doc_type="enrichment",
             job_id=job_id,
@@ -2897,7 +2935,12 @@ class CBLStore:
                 }
             elif mode == "stdout":
                 # stdout output removed — skip migration (stdout is no longer supported)
-                logger.info("Skipping stdout output migration — stdout mode removed")
+                log_event(
+                    logger,
+                    "info",
+                    "CBL",
+                    "skipping stdout output migration — stdout mode removed",
+                )
 
             if output_type and output_entry:
                 outputs_doc = {
@@ -2909,7 +2952,7 @@ class CBLStore:
                     logger,
                     "info",
                     "CBL",
-                    f"migrated v1.x output → outputs_{output_type}",
+                    "migrated v1.x output → outputs_%s" % output_type,
                     operation="MIGRATE",
                     output_type=output_type,
                 )
@@ -2936,7 +2979,7 @@ class CBLStore:
                     logger,
                     "warn",
                     "CBL",
-                    f"failed to read checkpoint.json: {e}",
+                    "failed to read checkpoint.json: %s" % e,
                     operation="MIGRATE",
                 )
 
@@ -2958,7 +3001,7 @@ class CBLStore:
                 logger,
                 "warn",
                 "CBL",
-                f"failed to read mappings: {e}",
+                "failed to read mappings: %s" % e,
                 operation="MIGRATE",
             )
 
@@ -3004,7 +3047,7 @@ class CBLStore:
                 logger,
                 "info",
                 "CBL",
-                f"migrated checkpoint to job {job_uuid}",
+                "migrated checkpoint to job %s" % job_uuid,
                 operation="MIGRATE",
                 job_id=job_uuid,
             )
@@ -3380,7 +3423,7 @@ def migrate_mappings_to_jobs() -> None:
                 logger,
                 "debug",
                 "CBL",
-                f"job {job_id} already has schema_mapping — skipping",
+                "job %s already has schema_mapping — skipping" % job_id,
                 operation="SELECT",
                 doc_type="job",
                 job_id=job_id,
@@ -3434,7 +3477,8 @@ def migrate_mappings_to_jobs() -> None:
                 logger,
                 "info",
                 "CBL",
-                f"embedded schema_mapping into job {job_id} from {mapping_source}",
+                "embedded schema_mapping into job %s from %s"
+                % (job_id, mapping_source),
                 operation="UPDATE",
                 doc_type="job",
                 job_id=job_id,
@@ -3446,7 +3490,7 @@ def migrate_mappings_to_jobs() -> None:
                 logger,
                 "warning",
                 "CBL",
-                f"no mapping found for job {job_id} — skipping",
+                "no mapping found for job %s — skipping" % job_id,
                 operation="SKIP",
                 doc_type="job",
                 job_id=job_id,
@@ -3456,7 +3500,8 @@ def migrate_mappings_to_jobs() -> None:
         logger,
         "info",
         "CBL",
-        f"mapping migration complete: {embedded} embedded, {skipped} skipped, {failed} failed",
+        "mapping migration complete: %d embedded, %d skipped, %d failed"
+        % (embedded, skipped, failed),
         operation="MIGRATE",
         doc_type="job",
         embedded=embedded,

@@ -166,9 +166,10 @@ json_schema/
 ### Parent Guides Directory
 ```
 guides/
+├── GUIDE_INDEX.md                 (This file)
+├── GUIDE_LOGGING.md               (Logging standards)
 ├── JSON_SCHEMA.md                 (Format guide)
 ├── SCHEMA_AUDIT_REPORT.md         (Compliance report)
-└── GUIDE_INDEX.md                 (This file)
 ```
 
 ---

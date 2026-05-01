@@ -678,10 +678,11 @@ class TestRetryableHTTP(unittest.TestCase):
         session.request.assert_called_once()
 
     def test_client_error_raises(self):
+        """Permanent 4xx (e.g. 400) should raise ClientHTTPError immediately."""
         session = MagicMock()
         resp = AsyncMock()
-        resp.status = 404
-        resp.text = AsyncMock(return_value="Not found")
+        resp.status = 400
+        resp.text = AsyncMock(return_value="Bad request")
         resp.content_type = "text/plain"
         session.request = AsyncMock(return_value=resp)
 
@@ -691,7 +692,25 @@ class TestRetryableHTTP(unittest.TestCase):
         )
         with self.assertRaises(cw.ClientHTTPError) as ctx:
             asyncio.run(http.request("GET", "http://example.com"))
-        self.assertEqual(ctx.exception.status, 404)
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_transient_404_retries(self):
+        """404 is transient — should retry and eventually exhaust."""
+        session = MagicMock()
+        resp = AsyncMock()
+        resp.status = 404
+        resp.text = AsyncMock(return_value="Not found")
+        resp.content_type = "text/plain"
+        resp.release = MagicMock()
+        session.request = AsyncMock(return_value=resp)
+
+        http = cw.RetryableHTTP(
+            session,
+            {"max_retries": 3, "backoff_base_seconds": 0, "backoff_max_seconds": 0},
+        )
+        with self.assertRaises(ConnectionError):
+            asyncio.run(http.request("GET", "http://example.com"))
+        self.assertEqual(session.request.call_count, 3)
 
     def test_retries_on_server_error(self):
         session = MagicMock()

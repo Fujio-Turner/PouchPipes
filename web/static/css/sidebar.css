@@ -58,13 +58,13 @@
   color: var(--color-base-content);
   cursor: pointer; padding: 4px; opacity: 0.5;
   transition: opacity var(--sidebar-transition), transform var(--sidebar-transition);
-  z-index: 2;
+  z-index: 52;
   display: flex; align-items: center; justify-content: center;
 }
 .sidebar-toggle:hover { opacity: 1; }
 .sidebar-toggle img { width: 18px; height: 18px; transition: transform var(--sidebar-transition); }
-/* In collapsed mode, hide the hamburger — user clicks the logo area to expand */
-.sidebar.collapsed .sidebar-toggle { opacity: 0; pointer-events: none; }
+/* In collapsed mode, show the hamburger rotated — user can click to expand */
+.sidebar.collapsed .sidebar-toggle { opacity: 0.7; pointer-events: auto; transform: rotate(90deg); }
 
 /* Clickable expand zone — the entire brand area becomes clickable when collapsed */
 .sidebar.collapsed .sidebar-brand { cursor: pointer; }
@@ -193,7 +193,7 @@
 }
 .sidebar.collapsed .sidebar-theme-label { opacity: 0; width: 0; overflow: hidden; }
 .sidebar.collapsed .sidebar-controls .tooltip { display: none; }
-.sidebar.collapsed #controlsHelpTrigger { display: none; }
+.sidebar.collapsed #controlsHelpTrigger { display: none !important; }
 .sidebar-version {
   margin-top: 6px; font-size: 10px; opacity: 0.35;
   white-space: nowrap; overflow: hidden;

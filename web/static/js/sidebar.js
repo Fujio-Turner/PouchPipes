@@ -105,7 +105,7 @@
             '<span class="sidebar-theme-label" id="themeLabel">Dark</span>' +
           '</button>' +
         '</div>' +
-        '<div class="sidebar-version">v2.2.2</div>' +
+        '<div class="sidebar-version">v2.3.0</div>' +
       '</div>' +
     '</aside>';
 

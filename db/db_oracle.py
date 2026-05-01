@@ -34,14 +34,34 @@ except ImportError:
 # ORA error codes that are transient (worth retrying).
 _TRANSIENT_ORA_CODES = frozenset(
     {
-        3113,  # end-of-file on communication channel
-        3114,  # not connected to ORACLE
-        3135,  # connection lost contact
-        12170,  # TNS:Connect timeout occurred
-        12541,  # TNS:no listener
-        12543,  # TNS:destination host unreachable
-        25408,  # can not safely replay call
-        60,  # deadlock detected while waiting for resource
+        # Resource exhaustion
+        20,  # ORA-00020: maximum number of processes exceeded
+        4031,  # ORA-04031: unable to allocate shared memory
+        # Lock / deadlock
+        54,  # ORA-00054: resource busy / NOWAIT timeout
+        60,  # ORA-00060: deadlock detected
+        4021,  # ORA-04021: timeout while waiting to lock object
+        # Serialization
+        8177,  # ORA-08177: can't serialize access for this transaction
+        1555,  # ORA-01555: snapshot too old
+        # Schema (may be recreated)
+        942,  # ORA-00942: table or view does not exist — may be recreated
+        # Server lifecycle
+        1033,  # ORA-01033: initialization or shutdown in progress
+        1034,  # ORA-01034: ORACLE not available
+        1089,  # ORA-01089: immediate shutdown in progress
+        # Connection
+        3113,  # ORA-03113: end-of-file on communication channel
+        3114,  # ORA-03114: not connected to ORACLE
+        3135,  # ORA-03135: connection lost contact
+        12170,  # ORA-12170: TNS connect timeout occurred
+        12516,  # ORA-12516: TNS listener could not find available handler
+        12519,  # ORA-12519: no appropriate service handler
+        12520,  # ORA-12520: no available handler for requested server type
+        12541,  # ORA-12541: TNS no listener
+        12543,  # ORA-12543: TNS destination host unreachable
+        # Replay
+        25408,  # ORA-25408: can not safely replay call
     }
 )
 
@@ -126,12 +146,6 @@ class OracleOutputForwarder(BaseOutputForwarder):
         if pool:
             await pool.close()
             log_event(logger, "info", "OUTPUT", "Oracle pool closed", mode="db")
-
-    async def _reconnect_pool(self) -> None:
-        ic("_reconnect_pool")
-        async with self._pool_lock:
-            await self._close_pool()
-            await self._connect_pool()
 
     # ── Oracle SQL generation helpers ───────────────────────────────────
 
@@ -271,18 +285,47 @@ class OracleOutputForwarder(BaseOutputForwarder):
             return "connection"
         code = _ora_error_code(exc)
         if code is not None:
-            if code in (3113, 3114, 3135, 12170, 12541, 12543):
+            # Connection
+            if code in (3113, 3114, 3135, 12170, 12541, 12543, 12516, 12519, 12520):
                 return "connection"
+            # Server lifecycle
+            if code in (1033, 1034, 1089):
+                return "server_shutdown"
+            # Lock / deadlock
             if code == 60:
                 return "deadlock"
-            if code == 1:  # ORA-00001: unique constraint violated
+            if code in (54, 4021):
+                return "lock_contention"
+            # Resource exhaustion
+            if code in (20, 4031):
+                return "resource_exhaustion"
+            # Serialization
+            if code in (8177, 1555):
+                return "serialization"
+            # Constraint violations
+            if code == 1:  # unique constraint violated
                 return "constraint_violation"
-            if code in (2291, 2292):  # FK violations
+            if code in (2290, 2291, 2292):  # check / FK violations
                 return "constraint_violation"
-            if code in (1722, 1858, 1861):  # type conversion errors
+            if code in (1400, 1407):  # null violations
+                return "constraint_violation"
+            # Data type errors
+            if code in (1722, 1840, 1841, 1843, 1847, 1858, 1861, 1438, 12899):
                 return "data_type"
-            if code in (942, 904, 903):  # table/column/schema not found
+            # Schema (table may be recreated)
+            if code == 942:  # table or view does not exist
+                return "table_not_found"
+            # Syntax / schema (permanent)
+            if code in (903, 904):  # invalid table name / identifier
                 return "syntax_or_schema"
+            # Auth / permission (permanent)
+            if code in (1017, 1031):
+                return "auth_failure"
+            if code in (28000, 28001):
+                return "auth_failure"
+            # Database config (permanent)
+            if code in (12154, 12505, 12514):
+                return "invalid_database"
             return f"ora_{code}"
         return "unknown"
 

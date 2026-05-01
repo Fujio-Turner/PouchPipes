@@ -239,6 +239,7 @@
       "log_level": "debug",
       "log_keys": ["*"],
       "key_levels": {},
+      "compress_rotated": true,
       "rotation": {
         "max_size": 100,
         "max_age": 7,

@@ -133,7 +133,7 @@ async def parse_multipart_response(
     log_event(
         logger,
         "debug",
-        "PROCESSING",
+        "ATTACHMENT",
         "multipart: parsed doc, expecting %d follows attachment(s)"
         % len(follows_names),
         doc_id=doc_id,
@@ -161,7 +161,7 @@ async def parse_multipart_response(
             log_event(
                 logger,
                 "debug",
-                "PROCESSING",
+                "ATTACHMENT",
                 "multipart: using positional name for part %d -> %s"
                 % (part_index, name),
                 doc_id=doc_id,
@@ -174,7 +174,7 @@ async def parse_multipart_response(
             log_event(
                 logger,
                 "warn",
-                "PROCESSING",
+                "ATTACHMENT",
                 "multipart: could not determine name for part %d, skipping"
                 % (part_index - 1),
                 doc_id=doc_id,
@@ -188,7 +188,7 @@ async def parse_multipart_response(
             log_event(
                 logger,
                 "debug",
-                "PROCESSING",
+                "ATTACHMENT",
                 "multipart: discarding unwanted attachment %s" % name,
                 doc_id=doc_id,
                 src=src,
@@ -206,7 +206,7 @@ async def parse_multipart_response(
         log_event(
             logger,
             "warn",
-            "PROCESSING",
+            "ATTACHMENT",
             "multipart: expected %d attachment part(s) but received %d"
             % (len(follows_names), part_index),
             doc_id=doc_id,
@@ -216,7 +216,7 @@ async def parse_multipart_response(
     log_event(
         logger,
         "debug",
-        "PROCESSING",
+        "ATTACHMENT",
         "multipart: returning %d attachment(s)" % len(attachments),
         doc_id=doc_id,
         src=src,

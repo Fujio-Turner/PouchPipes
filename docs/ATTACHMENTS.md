@@ -511,6 +511,107 @@ The attachment is uploaded but no post-processing is performed on the source doc
 
 ---
 
+## Audit Logging for Source Mutations
+
+Every PUT / DELETE / POST `_purge` the worker issues against the **source** database during post-processing is logged with the `[ATTACHMENT]` log key (see [`guides/GUIDE_LOGGING.md`](../guides/GUIDE_LOGGING.md#source-mutation-audit-fields-attachment-post-process-putdelete) for the full field reference). The goal is operational accountability: for any document we mutated on the source, you can grep the logs and answer:
+
+1. *Did the operation succeed?* — and if so, what is the new `_rev`?
+2. *If it failed, which class of failure was it?* — timeout, 401/403, 404, 409 conflict, or generic HTTP error
+3. *How long did it take, and how many attempts?*
+
+### Receipt: the new `_rev` proves the write happened
+
+CouchDB and Sync Gateway return a fresh `_rev` (e.g. `13-def456...`) on a successful PUT or DELETE. The worker logs that value as the **receipt** for the mutation. If you need to prove to an operator, customer, or auditor that the worker actually applied an `update_doc` / `set_ttl` / `delete_doc` / `delete_attachments` / `purge`, the `new_rev` field on the success line is the receipt.
+
+### Structured fields on every mutation log line
+
+| Field | Meaning |
+|---|---|
+| `pp_action` | `update_doc` \| `set_ttl` \| `delete_doc` \| `delete_attachments` \| `purge` |
+| `doc_id` | Document being mutated |
+| `rev` | Old `_rev` sent in the request |
+| `new_rev` | New `_rev` returned by the source on success — the **receipt** |
+| `method` | HTTP verb: `PUT` / `DELETE` / `POST` |
+| `status` | HTTP status code (when there is one) |
+| `el_ms` | Elapsed time in milliseconds for this attempt |
+| `attempt` | Retry attempt number (relevant for 409 conflict re-tries) |
+| `err_cls`, `err` | Exception class + message detail on failure |
+| `url` | Target URL (auto-redacted for credentials) |
+
+### Outcome coverage
+
+The post-processor in [`rest/attachment_postprocess.py`](../rest/attachment_postprocess.py) emits an explicit log line for every possible outcome of a source mutation:
+
+| HTTP outcome | Log level | Message (excerpt) | Key fields recorded |
+|---|---|---|---|
+| **2xx success** | `info` | `source PUT ok (receipt)` / `source DELETE ok (receipt)` / `source POST _purge ok` | `new_rev`, `status=200`, `el_ms` |
+| **Timeout / connection error** | `error` | `source ... timeout/connection error` | `err_cls`, `err`, `el_ms` |
+| **401 / 403 unauthorized** | `error` | `source ... unauthorized` | `status`, `err` |
+| **404 not found (doc missing)** | `warn` | `source ... 404 not_found (doc missing)` | `status=404` |
+| **409 conflict (doc changed)** | `warn` | `source ... 409 conflict (doc changed)` | `status=409` (then re-fetch + retry) |
+| **Other HTTP error (4xx / 5xx)** | `error` | `source ... http error` | `status`, `err_cls`, `err` |
+| **Unexpected exception** | `error` | `source ... unexpected error` | `err_cls`, `err` |
+
+A `debug` "begin" line (`source PUT begin` / `source DELETE begin` / `source POST _purge begin`) is emitted before each attempt with the URL, old rev, and attempt number. This lets you trace 409 conflict-retry loops end-to-end.
+
+### Example log lines
+
+Successful `update_doc` (the new rev `13-def456` is the receipt):
+
+```
+[INFO] [ATTACHMENT] job=..54e59 #s:..551b6a #b:a8b0tz changes_worker: source PUT ok (receipt) | doc_id order::12345 | method PUT | status 200 | el_ms 18.4 | attempt 1 | rev 12-abc123 | new_rev 13-def456 | pp_action update_doc
+```
+
+`delete_doc` succeeds (tombstone rev returned):
+
+```
+[INFO] [ATTACHMENT] job=..54e59 #s:..551b6a #b:a8b0tz changes_worker: source DELETE ok (receipt) — post-process delete_doc succeeded | doc_id order::12345 | method DELETE | status 200 | el_ms 12.1 | attempt 1 | rev 12-abc123 | new_rev 13-deleted789 | pp_action delete_doc
+```
+
+409 conflict followed by a successful retry:
+
+```
+[WARN] [ATTACHMENT] ... source PUT 409 conflict (doc changed) | doc_id order::12345 | method PUT | status 409 | el_ms 6.2 | attempt 1 | rev 12-abc123 | pp_action update_doc
+[INFO] [ATTACHMENT] ... source PUT ok (receipt) | doc_id order::12345 | method PUT | status 200 | el_ms 14.0 | attempt 2 | rev 12-newer456 | new_rev 13-def789 | pp_action update_doc
+```
+
+Authorization failure (the request raises and the doc continues to DLQ via the regular error path):
+
+```
+[ERROR] [ATTACHMENT] ... source DELETE unauthorized | doc_id order::12345 | method DELETE | status 403 | el_ms 4.0 | attempt 1 | rev 12-abc123 | err HTTP 403: forbidden | pp_action delete_doc
+```
+
+Timeout (no `status`, but `err_cls` identifies the failure mode):
+
+```
+[ERROR] [ATTACHMENT] ... source PUT timeout/connection error | doc_id order::12345 | method PUT | el_ms 30000.0 | attempt 1 | rev 12-abc123 | err_cls TimeoutError | err All 5 retries exhausted for PUT ... | pp_action update_doc
+```
+
+### Greppable audit recipes
+
+```bash
+# All mutations the worker performed against the source for one doc
+grep '\[ATTACHMENT\]' logs/*_info.log logs/*_debug.log | grep 'doc_id order::12345'
+
+# Just the success receipts (the new_rev is the audit proof)
+grep '\[ATTACHMENT\]' logs/*_info.log | grep 'receipt' | grep 'doc_id order::12345'
+
+# Every failed mutation, grouped by failure class
+grep '\[ATTACHMENT\]' logs/*_error.log | grep -oE 'pp_action \w+' | sort | uniq -c
+
+# All 409 conflicts that needed a retry
+grep '\[ATTACHMENT\]' logs/*_info.log | grep '409 conflict'
+
+# All unauthorized writes (401/403) — likely a credentials/role issue
+grep '\[ATTACHMENT\]' logs/*_error.log | grep 'unauthorized'
+```
+
+### Halt-on-failure interaction
+
+When `attachments.halt_on_failure: true`, an unauthorized / generic HTTP / timeout failure on a source mutation is re-raised as `AttachmentError` and the document goes to DLQ. The audit log line is emitted *before* the exception is re-raised, so the reason for the DLQ entry is always recoverable from the logs even when the exception itself is wrapped further up the stack.
+
+---
+
 ## Metrics
 
 New Prometheus metrics for attachment processing (extending `MetricsCollector`):

@@ -129,7 +129,7 @@ class AttachmentStreamer:
         log_event(
             logger,
             "debug",
-            "PROCESSING",
+            "ATTACHMENT",
             "streamed attachment %s → %s (%d bytes, %.1fms)"
             % (name, dest_type, length, elapsed * 1000),
             doc_id=doc_id,

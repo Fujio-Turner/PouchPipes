@@ -183,6 +183,168 @@
               </div>
               <label class="label cursor-pointer justify-start gap-2"><span class="label-text text-xs font-semibold">Enabled</span>
                 <input id="httpEnabled" type="checkbox" class="toggle toggle-sm toggle-success" checked /></label>
+
+              <!-- Advanced Section (collapsed) -->
+              <div class="collapse collapse-arrow bg-base-300 rounded-xl">
+                <input type="checkbox" />
+                <div class="collapse-title text-xs font-semibold opacity-70">Advanced</div>
+                <div class="collapse-content">
+                  <div class="divider text-xs opacity-60">Serialization &amp; Routing</div>
+                  <div class="grid grid-cols-3 gap-4">
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Output Format
+                        <div class="tooltip tooltip-bottom inline" data-tip="Serialization format for the request body sent to the target endpoint.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <select id="httpOutputFormat" class="select select-bordered select-sm w-full">
+                        <option value="json">JSON</option><option value="xml">XML</option>
+                        <option value="form">Form-Encoded</option><option value="msgpack">MsgPack</option>
+                        <option value="cbor">CBOR</option><option value="bson">BSON</option>
+                        <option value="yaml">YAML</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Delete Method
+                        <div class="tooltip tooltip-bottom inline" data-tip="HTTP method used when a document deletion is detected (default: DELETE).">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <select id="httpDeleteMethod" class="select select-bordered select-sm w-full">
+                        <option value="DELETE">DELETE</option><option value="POST">POST</option><option value="PUT">PUT</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        URL Template
+                        <div class="tooltip tooltip-bottom inline" data-tip="URL pattern for each request. Available placeholders: {target_url}, {doc_id}.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <input id="httpUrlTemplate" type="text" class="input input-bordered input-sm w-full" value="{target_url}/{doc_id}" />
+                    </div>
+                  </div>
+
+                  <div class="divider text-xs opacity-60">Behavior</div>
+                  <div class="grid grid-cols-3 gap-4">
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Data Error Action
+                        <div class="tooltip tooltip-bottom inline" data-tip="What to do when a document fails to send. 'dlq' = dead-letter queue, 'skip' = discard silently.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <select id="httpDataErrorAction" class="select select-bordered select-sm w-full">
+                        <option value="dlq">DLQ (Dead-Letter Queue)</option><option value="skip">Skip</option>
+                      </select>
+                    </div>
+                    <div class="flex flex-col justify-end gap-2">
+                      <label class="label cursor-pointer justify-start gap-2">
+                        <span class="label-text text-xs font-semibold">Halt on Failure</span>
+                        <div class="tooltip tooltip-bottom inline" data-tip="Stop the job when the output endpoint is unreachable after exhausting retries.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                        <input id="httpHaltOnFailure" type="checkbox" class="toggle toggle-sm toggle-warning" checked />
+                      </label>
+                    </div>
+                    <div class="flex flex-col justify-end gap-2">
+                      <label class="label cursor-pointer justify-start gap-2">
+                        <span class="label-text text-xs font-semibold">Send Delete Body</span>
+                        <div class="tooltip tooltip-bottom inline" data-tip="Include the document body in DELETE requests (some APIs require a body on DELETE).">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                        <input id="httpSendDeleteBody" type="checkbox" class="toggle toggle-sm" />
+                      </label>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-3 gap-4 mt-3">
+                    <div class="flex flex-col justify-end gap-2">
+                      <label class="label cursor-pointer justify-start gap-2">
+                        <span class="label-text text-xs font-semibold">Follow Redirects</span>
+                        <div class="tooltip tooltip-bottom inline" data-tip="Automatically follow 3xx redirects instead of treating them as errors.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                        <input id="httpFollowRedirects" type="checkbox" class="toggle toggle-sm" />
+                      </label>
+                    </div>
+                    <div class="flex flex-col justify-end gap-2">
+                      <label class="label cursor-pointer justify-start gap-2">
+                        <span class="label-text text-xs font-semibold">Accept Self-Signed Certs</span>
+                        <div class="tooltip tooltip-bottom inline" data-tip="Disable TLS certificate verification (for self-signed or internal certs).">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                        <input id="httpSelfSignedCerts" type="checkbox" class="toggle toggle-sm" />
+                      </label>
+                    </div>
+                    <div class="flex flex-col justify-end gap-2">
+                      <label class="label cursor-pointer justify-start gap-2">
+                        <span class="label-text text-xs font-semibold">Log Response Times</span>
+                        <div class="tooltip tooltip-bottom inline" data-tip="Track and log per-request response times (min/max/avg).">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                        <input id="httpLogResponseTimes" type="checkbox" class="toggle toggle-sm" checked />
+                      </label>
+                    </div>
+                  </div>
+
+                  <div class="divider text-xs opacity-60">Authentication</div>
+                  <div class="grid grid-cols-3 gap-4">
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Auth Method
+                        <div class="tooltip tooltip-bottom inline" data-tip="Authentication method for the target endpoint.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <select id="httpAuthMethod" class="select select-bordered select-sm w-full" onchange="toggleHttpAuth()">
+                        <option value="none">None</option><option value="basic">Basic</option>
+                        <option value="bearer">Bearer Token</option><option value="session">Session Cookie</option>
+                      </select>
+                    </div>
+                    <div id="httpAuthUserWrap" class="hidden">
+                      <label class="label label-text text-xs font-semibold">Username</label>
+                      <input id="httpAuthUser" type="text" class="input input-bordered input-sm w-full" />
+                    </div>
+                    <div id="httpAuthPassWrap" class="hidden">
+                      <label class="label label-text text-xs font-semibold">Password</label>
+                      <input id="httpAuthPass" type="password" class="input input-bordered input-sm w-full" />
+                    </div>
+                    <div id="httpAuthBearerWrap" class="hidden">
+                      <label class="label label-text text-xs font-semibold">Bearer Token</label>
+                      <input id="httpAuthBearer" type="password" class="input input-bordered input-sm w-full" />
+                    </div>
+                    <div id="httpAuthSessionWrap" class="hidden">
+                      <label class="label label-text text-xs font-semibold">Session Cookie</label>
+                      <input id="httpAuthSession" type="text" class="input input-bordered input-sm w-full" />
+                    </div>
+                  </div>
+
+                  <div class="divider text-xs opacity-60">Custom Headers &amp; Query Params</div>
+                  <div class="grid grid-cols-2 gap-4">
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Extra Headers (JSON)
+                        <div class="tooltip tooltip-bottom inline" data-tip='Additional HTTP headers as JSON, e.g. {"X-Api-Key":"abc123"}'>
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <input id="httpExtraHeaders" type="text" class="input input-bordered input-sm w-full font-mono" placeholder='{"X-Api-Key":"abc123"}' />
+                    </div>
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Extra Query Params (JSON)
+                        <div class="tooltip tooltip-bottom inline" data-tip='Additional URL query parameters as JSON, e.g. {"api_key":"xyz"}'>
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <input id="httpExtraParams" type="text" class="input input-bordered input-sm w-full font-mono" placeholder='{"api_key":"xyz"}' />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div class="flex gap-2 mt-2">
                 <button class="btn btn-success btn-sm" onclick="saveOutput('http')">Save Output</button>
                 <button class="btn btn-primary btn-sm" onclick="testOutput('http')">Test Connection</button>
@@ -246,6 +408,239 @@
               </div>
               <label class="label cursor-pointer justify-start gap-2"><span class="label-text text-xs font-semibold">Enabled</span>
                 <input id="cloudEnabled" type="checkbox" class="toggle toggle-sm toggle-success" checked /></label>
+
+              <!-- Advanced Section (collapsed) -->
+              <div class="collapse collapse-arrow bg-base-300 rounded-xl">
+                <input type="checkbox" />
+                <div class="collapse-title text-xs font-semibold opacity-70">Advanced</div>
+                <div class="collapse-content">
+                  <div class="divider text-xs opacity-60">Format &amp; Compression</div>
+                  <div class="grid grid-cols-3 gap-4">
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Data Format
+                        <div class="tooltip tooltip-bottom inline" data-tip="Serialization format for stored objects.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <select id="cloudFormat" class="select select-bordered select-sm w-full">
+                        <option value="json">JSON</option><option value="jsonl">JSONL</option>
+                        <option value="parquet">Parquet</option><option value="csv">CSV</option>
+                        <option value="avro">Avro</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Compression
+                        <div class="tooltip tooltip-bottom inline" data-tip="Compression algorithm applied before upload.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <select id="cloudCompression" class="select select-bordered select-sm w-full">
+                        <option value="none">None</option><option value="gzip">Gzip</option>
+                        <option value="snappy">Snappy</option><option value="brotli">Brotli</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        On Delete
+                        <div class="tooltip tooltip-bottom inline" data-tip="Action when a document deletion is detected. 'delete' removes the object, 'ignore' skips it.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <select id="cloudOnDelete" class="select select-bordered select-sm w-full">
+                        <option value="delete">Delete Object</option><option value="ignore">Ignore</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div class="divider text-xs opacity-60">Key Template</div>
+                  <div class="grid grid-cols-2 gap-4">
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Key Prefix
+                        <div class="tooltip tooltip-bottom inline" data-tip="Prefix prepended to object keys. Available as {prefix} in the key template.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <input id="cloudKeyPrefix" type="text" class="input input-bordered input-sm w-full" value="couchdb-changes" />
+                    </div>
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Key Template
+                        <div class="tooltip tooltip-bottom inline" data-tip="Object key pattern. Placeholders: {prefix}, {doc_id}, {rev}, {seq}, {timestamp}, {iso_date}, {year}, {month}, {day}, {scope}, {collection}, {database}.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <input id="cloudKeyTemplate" type="text" class="input input-bordered input-sm w-full font-mono" value="{prefix}/{doc_id}.json" />
+                    </div>
+                  </div>
+
+                  <div class="divider text-xs opacity-60">Batching</div>
+                  <div class="grid grid-cols-4 gap-4">
+                    <div class="flex flex-col justify-end gap-2">
+                      <label class="label cursor-pointer justify-start gap-2">
+                        <span class="label-text text-xs font-semibold">Batch Enabled</span>
+                        <div class="tooltip tooltip-bottom inline" data-tip="Group multiple documents into a single upload (JSONL).">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                        <input id="cloudBatchEnabled" type="checkbox" class="toggle toggle-sm" />
+                      </label>
+                    </div>
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Max Docs
+                        <div class="tooltip tooltip-bottom inline" data-tip="Maximum number of documents per batch upload.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <input id="cloudBatchMaxDocs" type="number" class="input input-bordered input-sm w-full" value="100" />
+                    </div>
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Max Bytes
+                        <div class="tooltip tooltip-bottom inline" data-tip="Maximum batch size in bytes before flushing (default: 1 MB).">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <input id="cloudBatchMaxBytes" type="number" class="input input-bordered input-sm w-full" value="1048576" />
+                    </div>
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Max Seconds
+                        <div class="tooltip tooltip-bottom inline" data-tip="Maximum time in seconds before flushing the batch.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <input id="cloudBatchMaxSec" type="number" class="input input-bordered input-sm w-full" value="5" step="0.1" />
+                    </div>
+                  </div>
+
+                  <div class="divider text-xs opacity-60">Retry &amp; Error Handling</div>
+                  <div class="grid grid-cols-3 gap-4">
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Max Retries
+                        <div class="tooltip tooltip-bottom inline" data-tip="Maximum retry attempts for transient errors.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <input id="cloudMaxRetries" type="number" class="input input-bordered input-sm w-full" value="3" />
+                    </div>
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Backoff Base (sec)
+                        <div class="tooltip tooltip-bottom inline" data-tip="Base delay for exponential backoff between retries.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <input id="cloudBackoffBase" type="number" class="input input-bordered input-sm w-full" value="0.5" step="0.1" />
+                    </div>
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Backoff Max (sec)
+                        <div class="tooltip tooltip-bottom inline" data-tip="Maximum delay between retries.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <input id="cloudBackoffMax" type="number" class="input input-bordered input-sm w-full" value="10" />
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-3 gap-4 mt-3">
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Data Error Action
+                        <div class="tooltip tooltip-bottom inline" data-tip="What to do when a document fails. 'dlq' = dead-letter queue, 'skip' = discard.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <select id="cloudDataErrorAction" class="select select-bordered select-sm w-full">
+                        <option value="dlq">DLQ (Dead-Letter Queue)</option><option value="skip">Skip</option>
+                      </select>
+                    </div>
+                    <div class="flex flex-col justify-end gap-2">
+                      <label class="label cursor-pointer justify-start gap-2">
+                        <span class="label-text text-xs font-semibold">Halt on Failure</span>
+                        <div class="tooltip tooltip-bottom inline" data-tip="Stop the job when the cloud provider is unreachable after exhausting retries.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                        <input id="cloudHaltOnFailure" type="checkbox" class="toggle toggle-sm toggle-warning" checked />
+                      </label>
+                    </div>
+                  </div>
+
+                  <div class="divider text-xs opacity-60">Credentials</div>
+                  <div class="grid grid-cols-3 gap-4">
+                    <div>
+                      <label class="label label-text text-xs font-semibold">Access Key</label>
+                      <input id="cloudAccessKey" type="text" class="input input-bordered input-sm w-full" placeholder="AKIA..." />
+                    </div>
+                    <div>
+                      <label class="label label-text text-xs font-semibold">Secret Key</label>
+                      <input id="cloudSecretKey" type="password" class="input input-bordered input-sm w-full" />
+                    </div>
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Session Token
+                        <div class="tooltip tooltip-bottom inline" data-tip="Optional AWS STS session token for temporary credentials.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <input id="cloudSessionToken" type="password" class="input input-bordered input-sm w-full" />
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-2 gap-4 mt-3">
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Endpoint URL
+                        <div class="tooltip tooltip-bottom inline" data-tip="Custom S3-compatible endpoint (MinIO, LocalStack, Ceph, etc.). Leave blank for AWS.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <input id="cloudEndpointUrl" type="text" class="input input-bordered input-sm w-full font-mono" placeholder="https://minio.local:9000" />
+                    </div>
+                  </div>
+
+                  <div class="divider text-xs opacity-60">Storage Options (S3)</div>
+                  <div class="grid grid-cols-3 gap-4">
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Storage Class
+                        <div class="tooltip tooltip-bottom inline" data-tip="S3 storage class for uploaded objects.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <select id="cloudStorageClass" class="select select-bordered select-sm w-full">
+                        <option value="">Default</option>
+                        <option value="STANDARD">Standard</option>
+                        <option value="STANDARD_IA">Standard-IA</option>
+                        <option value="ONEZONE_IA">One Zone-IA</option>
+                        <option value="INTELLIGENT_TIERING">Intelligent-Tiering</option>
+                        <option value="GLACIER">Glacier</option>
+                        <option value="DEEP_ARCHIVE">Glacier Deep Archive</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label class="label label-text text-xs font-semibold">
+                        Server-Side Encryption
+                        <div class="tooltip tooltip-bottom inline" data-tip="Encryption method for stored objects.">
+                          <span class="badge badge-ghost badge-sm cursor-help">?</span>
+                        </div>
+                      </label>
+                      <select id="cloudSSE" class="select select-bordered select-sm w-full" onchange="document.getElementById('cloudKmsWrap').classList.toggle('hidden',this.value!=='aws:kms')">
+                        <option value="">None</option>
+                        <option value="AES256">SSE-S3 (AES256)</option>
+                        <option value="aws:kms">SSE-KMS</option>
+                      </select>
+                    </div>
+                    <div id="cloudKmsWrap" class="hidden">
+                      <label class="label label-text text-xs font-semibold">KMS Key ID</label>
+                      <input id="cloudKmsKeyId" type="text" class="input input-bordered input-sm w-full font-mono" placeholder="arn:aws:kms:..." />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div class="flex gap-2 mt-2">
                 <button class="btn btn-success btn-sm" onclick="saveOutput('cloud')">Save Output</button>
                 <button class="btn btn-ghost btn-sm" onclick="hideOutputForm('cloud')">Cancel</button>
@@ -488,6 +883,24 @@
         document.getElementById('httpTimeout').value = '30';
         document.getElementById('httpRetry').value = '3';
         document.getElementById('httpEnabled').checked = true;
+        // Advanced defaults
+        document.getElementById('httpOutputFormat').value = 'json';
+        document.getElementById('httpDeleteMethod').value = 'DELETE';
+        document.getElementById('httpUrlTemplate').value = '{target_url}/{doc_id}';
+        document.getElementById('httpDataErrorAction').value = 'dlq';
+        document.getElementById('httpHaltOnFailure').checked = true;
+        document.getElementById('httpSendDeleteBody').checked = false;
+        document.getElementById('httpFollowRedirects').checked = false;
+        document.getElementById('httpSelfSignedCerts').checked = false;
+        document.getElementById('httpLogResponseTimes').checked = true;
+        document.getElementById('httpAuthMethod').value = 'none';
+        document.getElementById('httpAuthUser').value = '';
+        document.getElementById('httpAuthPass').value = '';
+        document.getElementById('httpAuthBearer').value = '';
+        document.getElementById('httpAuthSession').value = '';
+        document.getElementById('httpExtraHeaders').value = '';
+        document.getElementById('httpExtraParams').value = '';
+        toggleHttpAuth();
       } else if (type === 'cloud') {
         document.getElementById('cloudId').value = '';
         document.getElementById('cloudName').value = '';
@@ -496,6 +909,29 @@
         document.getElementById('cloudBucket').value = '';
         document.getElementById('cloudPrefix').value = '';
         document.getElementById('cloudEnabled').checked = true;
+        // Advanced defaults
+        document.getElementById('cloudFormat').value = 'jsonl';
+        document.getElementById('cloudCompression').value = 'none';
+        document.getElementById('cloudOnDelete').value = 'delete';
+        document.getElementById('cloudKeyPrefix').value = 'couchdb-changes';
+        document.getElementById('cloudKeyTemplate').value = '{prefix}/{doc_id}.json';
+        document.getElementById('cloudBatchEnabled').checked = false;
+        document.getElementById('cloudBatchMaxDocs').value = '100';
+        document.getElementById('cloudBatchMaxBytes').value = '1048576';
+        document.getElementById('cloudBatchMaxSec').value = '5';
+        document.getElementById('cloudMaxRetries').value = '3';
+        document.getElementById('cloudBackoffBase').value = '0.5';
+        document.getElementById('cloudBackoffMax').value = '10';
+        document.getElementById('cloudDataErrorAction').value = 'dlq';
+        document.getElementById('cloudHaltOnFailure').checked = true;
+        document.getElementById('cloudAccessKey').value = '';
+        document.getElementById('cloudSecretKey').value = '';
+        document.getElementById('cloudSessionToken').value = '';
+        document.getElementById('cloudEndpointUrl').value = '';
+        document.getElementById('cloudStorageClass').value = '';
+        document.getElementById('cloudSSE').value = '';
+        document.getElementById('cloudKmsKeyId').value = '';
+        document.getElementById('cloudKmsWrap').classList.add('hidden');
       }
     }
 
@@ -528,6 +964,26 @@
         document.getElementById('httpTimeout').value = entry.timeout_seconds || 30;
         document.getElementById('httpRetry').value = entry.retry_count || 3;
         document.getElementById('httpEnabled').checked = entry.enabled !== false;
+        // Advanced fields
+        document.getElementById('httpOutputFormat').value = entry.output_format || 'json';
+        document.getElementById('httpDeleteMethod').value = entry.delete_method || 'DELETE';
+        document.getElementById('httpUrlTemplate').value = entry.url_template || '{target_url}/{doc_id}';
+        document.getElementById('httpDataErrorAction').value = entry.data_error_action || 'dlq';
+        document.getElementById('httpHaltOnFailure').checked = entry.halt_on_failure !== false;
+        document.getElementById('httpSendDeleteBody').checked = !!entry.send_delete_body;
+        document.getElementById('httpFollowRedirects').checked = !!entry.follow_redirects;
+        document.getElementById('httpSelfSignedCerts').checked = !!entry.accept_self_signed_certs;
+        document.getElementById('httpLogResponseTimes').checked = entry.log_response_times !== false;
+        var auth = entry.target_auth || {};
+        document.getElementById('httpAuthMethod').value = auth.method || 'none';
+        document.getElementById('httpAuthUser').value = auth.username || '';
+        document.getElementById('httpAuthPass').value = auth.password || '';
+        document.getElementById('httpAuthBearer').value = auth.bearer_token || '';
+        document.getElementById('httpAuthSession').value = auth.session_cookie || '';
+        toggleHttpAuth();
+        var reqOpts = entry.request_options || {};
+        document.getElementById('httpExtraHeaders').value = reqOpts.headers ? JSON.stringify(reqOpts.headers) : '';
+        document.getElementById('httpExtraParams').value = reqOpts.params ? JSON.stringify(reqOpts.params) : '';
       } else if (type === 'cloud') {
         document.getElementById('cloudId').value = entry.id || '';
         document.getElementById('cloudName').value = entry.name || '';
@@ -536,6 +992,30 @@
         document.getElementById('cloudBucket').value = entry.bucket || '';
         document.getElementById('cloudPrefix').value = entry.prefix || '';
         document.getElementById('cloudEnabled').checked = entry.enabled !== false;
+        // Advanced fields
+        document.getElementById('cloudFormat').value = entry.format || 'jsonl';
+        document.getElementById('cloudCompression').value = entry.compression || 'none';
+        document.getElementById('cloudOnDelete').value = entry.on_delete || 'delete';
+        document.getElementById('cloudKeyPrefix').value = entry.key_prefix || 'couchdb-changes';
+        document.getElementById('cloudKeyTemplate').value = entry.key_template || '{prefix}/{doc_id}.json';
+        var batch = entry.batch || {};
+        document.getElementById('cloudBatchEnabled').checked = !!batch.enabled;
+        document.getElementById('cloudBatchMaxDocs').value = batch.max_docs || 100;
+        document.getElementById('cloudBatchMaxBytes').value = batch.max_bytes || 1048576;
+        document.getElementById('cloudBatchMaxSec').value = batch.max_seconds || 5;
+        document.getElementById('cloudMaxRetries').value = entry.max_retries || 3;
+        document.getElementById('cloudBackoffBase').value = entry.backoff_base_seconds || 0.5;
+        document.getElementById('cloudBackoffMax').value = entry.backoff_max_seconds || 10;
+        document.getElementById('cloudDataErrorAction').value = entry.data_error_action || 'dlq';
+        document.getElementById('cloudHaltOnFailure').checked = entry.halt_on_failure !== false;
+        document.getElementById('cloudAccessKey').value = entry.access_key || '';
+        document.getElementById('cloudSecretKey').value = entry.secret_key || '';
+        document.getElementById('cloudSessionToken').value = entry.session_token || '';
+        document.getElementById('cloudEndpointUrl').value = entry.endpoint_url || '';
+        document.getElementById('cloudStorageClass').value = entry.storage_class || '';
+        document.getElementById('cloudSSE').value = entry.server_side_encryption || '';
+        document.getElementById('cloudKmsKeyId').value = entry.kms_key_id || '';
+        document.getElementById('cloudKmsWrap').classList.toggle('hidden', (entry.server_side_encryption || '') !== 'aws:kms');
       }
     }
 
@@ -565,6 +1045,21 @@
           }
         };
       } else if (type === 'http') {
+        var authMethod = document.getElementById('httpAuthMethod').value;
+        var targetAuth = { method: authMethod };
+        if (authMethod === 'basic') {
+          targetAuth.username = document.getElementById('httpAuthUser').value.trim();
+          targetAuth.password = document.getElementById('httpAuthPass').value;
+        } else if (authMethod === 'bearer') {
+          targetAuth.bearer_token = document.getElementById('httpAuthBearer').value.trim();
+        } else if (authMethod === 'session') {
+          targetAuth.session_cookie = document.getElementById('httpAuthSession').value.trim();
+        }
+        var reqOptions = {};
+        var hdrVal = document.getElementById('httpExtraHeaders').value.trim();
+        var prmVal = document.getElementById('httpExtraParams').value.trim();
+        if (hdrVal) { try { reqOptions.headers = JSON.parse(hdrVal); } catch(e) { alert('Extra Headers must be valid JSON'); return; } }
+        if (prmVal) { try { reqOptions.params = JSON.parse(prmVal); } catch(e) { alert('Extra Query Params must be valid JSON'); return; } }
         return {
           id: document.getElementById('httpId').value.trim(),
           name: document.getElementById('httpName').value.trim(),
@@ -572,18 +1067,56 @@
           target_url: document.getElementById('httpUrl').value.trim(),
           write_method: document.getElementById('httpMethod').value,
           timeout_seconds: parseInt(document.getElementById('httpTimeout').value) || 30,
-          retry_count: parseInt(document.getElementById('httpRetry').value) || 3
+          retry_count: parseInt(document.getElementById('httpRetry').value) || 3,
+          output_format: document.getElementById('httpOutputFormat').value,
+          delete_method: document.getElementById('httpDeleteMethod').value,
+          url_template: document.getElementById('httpUrlTemplate').value.trim() || '{target_url}/{doc_id}',
+          data_error_action: document.getElementById('httpDataErrorAction').value,
+          halt_on_failure: document.getElementById('httpHaltOnFailure').checked,
+          send_delete_body: document.getElementById('httpSendDeleteBody').checked,
+          follow_redirects: document.getElementById('httpFollowRedirects').checked,
+          accept_self_signed_certs: document.getElementById('httpSelfSignedCerts').checked,
+          log_response_times: document.getElementById('httpLogResponseTimes').checked,
+          target_auth: targetAuth,
+          request_options: reqOptions
         };
       } else if (type === 'cloud') {
-        return {
+        var data = {
           id: document.getElementById('cloudId').value.trim(),
           name: document.getElementById('cloudName').value.trim(),
           enabled: document.getElementById('cloudEnabled').checked,
           provider: document.getElementById('cloudProvider').value,
           region: document.getElementById('cloudRegion').value.trim(),
           bucket: document.getElementById('cloudBucket').value.trim(),
-          prefix: document.getElementById('cloudPrefix').value.trim()
+          prefix: document.getElementById('cloudPrefix').value.trim(),
+          format: document.getElementById('cloudFormat').value,
+          compression: document.getElementById('cloudCompression').value,
+          on_delete: document.getElementById('cloudOnDelete').value,
+          key_prefix: document.getElementById('cloudKeyPrefix').value.trim() || 'couchdb-changes',
+          key_template: document.getElementById('cloudKeyTemplate').value.trim() || '{prefix}/{doc_id}.json',
+          batch: {
+            enabled: document.getElementById('cloudBatchEnabled').checked,
+            max_docs: parseInt(document.getElementById('cloudBatchMaxDocs').value) || 100,
+            max_bytes: parseInt(document.getElementById('cloudBatchMaxBytes').value) || 1048576,
+            max_seconds: parseFloat(document.getElementById('cloudBatchMaxSec').value) || 5
+          },
+          max_retries: parseInt(document.getElementById('cloudMaxRetries').value) || 3,
+          backoff_base_seconds: parseFloat(document.getElementById('cloudBackoffBase').value) || 0.5,
+          backoff_max_seconds: parseInt(document.getElementById('cloudBackoffMax').value) || 10,
+          data_error_action: document.getElementById('cloudDataErrorAction').value,
+          halt_on_failure: document.getElementById('cloudHaltOnFailure').checked,
+          endpoint_url: document.getElementById('cloudEndpointUrl').value.trim(),
+          storage_class: document.getElementById('cloudStorageClass').value,
+          server_side_encryption: document.getElementById('cloudSSE').value,
+          kms_key_id: document.getElementById('cloudKmsKeyId').value.trim()
         };
+        var ak = document.getElementById('cloudAccessKey').value.trim();
+        var sk = document.getElementById('cloudSecretKey').value;
+        var st = document.getElementById('cloudSessionToken').value;
+        if (ak) data.access_key = ak;
+        if (sk) data.secret_key = sk;
+        if (st) data.session_token = st;
+        return data;
       }
     }
 
@@ -702,6 +1235,15 @@
           loadAllCounts();
         })
         .catch(function(err){ alert('Delete failed: ' + err.message); });
+    }
+
+    // ===== Toggle HTTP Auth Fields =====
+    function toggleHttpAuth() {
+      var method = document.getElementById('httpAuthMethod').value;
+      document.getElementById('httpAuthUserWrap').classList.toggle('hidden', method !== 'basic');
+      document.getElementById('httpAuthPassWrap').classList.toggle('hidden', method !== 'basic');
+      document.getElementById('httpAuthBearerWrap').classList.toggle('hidden', method !== 'bearer');
+      document.getElementById('httpAuthSessionWrap').classList.toggle('hidden', method !== 'session');
     }
 
     // ===== Init =====

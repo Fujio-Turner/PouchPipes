@@ -51,6 +51,132 @@ logger = logging.getLogger("changes_worker")
 
 
 # ---------------------------------------------------------------------------
+# HTTP status code classification
+# ---------------------------------------------------------------------------
+# Transient statuses: may succeed on retry (server busy, rate limit, timeout).
+# Permanent statuses: same request will always fail (bad data, auth, conflict).
+
+# 4xx codes that are TRANSIENT — retry with backoff
+_TRANSIENT_4XX = frozenset(
+    {
+        404,  # Not Found — resource/endpoint may come back
+        408,  # Request Timeout — server timed out waiting
+        421,  # Misdirected Request — routing issue, retry may hit correct server
+        423,  # Locked (WebDAV) — resource temporarily locked
+        425,  # Too Early — server unwilling to risk replay, try again
+        429,  # Too Many Requests — rate limited, retry after backoff
+    }
+)
+
+# 4xx codes that are PERMANENT — straight to DLQ, will never succeed with same data
+_PERMANENT_4XX = frozenset(
+    {
+        400,  # Bad Request — malformed payload
+        401,  # Unauthorized — auth failure
+        402,  # Payment Required
+        403,  # Forbidden — permission denied
+        405,  # Method Not Allowed — wrong HTTP method
+        406,  # Not Acceptable — content negotiation failure
+        407,  # Proxy Authentication Required
+        409,  # Conflict — data conflict, same data won't resolve it
+        410,  # Gone — resource permanently removed
+        411,  # Length Required — request config issue
+        412,  # Precondition Failed — conditional request failed
+        413,  # Payload Too Large — doc too big for endpoint
+        414,  # URI Too Long
+        415,  # Unsupported Media Type — wrong content type
+        416,  # Range Not Satisfiable
+        417,  # Expectation Failed
+        422,  # Unprocessable Entity — semantic errors in payload
+        426,  # Upgrade Required — protocol mismatch
+        428,  # Precondition Required
+        431,  # Request Header Fields Too Large
+        451,  # Unavailable For Legal Reasons
+    }
+)
+
+# 5xx codes that are TRANSIENT — retry with backoff (default behavior)
+_TRANSIENT_5XX = frozenset(
+    {
+        500,  # Internal Server Error — generic, may recover
+        502,  # Bad Gateway — upstream issue
+        503,  # Service Unavailable — overloaded or maintenance
+        504,  # Gateway Timeout — upstream timeout
+        507,  # Insufficient Storage (WebDAV) — may free up
+    }
+)
+
+# 5xx codes that are PERMANENT — server config/capability issue
+_PERMANENT_5XX = frozenset(
+    {
+        501,  # Not Implemented — server doesn't support this method
+        505,  # HTTP Version Not Supported
+        506,  # Variant Also Negotiates — server config error
+        508,  # Loop Detected (WebDAV) — circular reference
+        510,  # Not Extended
+        511,  # Network Authentication Required — captive portal
+    }
+)
+
+
+def classify_http_status(status: int) -> tuple[str, bool]:
+    """Classify an HTTP status code.
+
+    Returns (error_class, is_transient) where:
+      - error_class: machine-readable classification string
+      - is_transient: True if the request may succeed on retry
+
+    Used by both the RetryableHTTP request loop and the OutputForwarder
+    to decide retry-vs-DLQ behavior.
+    """
+    if 200 <= status < 300:
+        return ("success", False)
+    if 300 <= status < 400:
+        return ("redirect", False)  # handled separately by follow_redirects
+    if status in _TRANSIENT_4XX:
+        if status == 429:
+            return ("rate_limited", True)
+        if status == 408:
+            return ("client_timeout", True)
+        if status == 404:
+            return ("not_found", True)
+        if status == 423:
+            return ("locked", True)
+        return (f"client_transient:{status}", True)
+    if status in _PERMANENT_4XX:
+        if status in (401, 403, 407):
+            return ("auth_failure", False)
+        if status == 409:
+            return ("conflict", False)
+        if status == 410:
+            return ("gone", False)
+        if status in (400, 422):
+            return ("bad_request", False)
+        if status in (405, 415):
+            return ("method_or_media", False)
+        if status == 413:
+            return ("payload_too_large", False)
+        return (f"client_error:{status}", False)
+    if 400 <= status < 500:
+        # Unknown 4xx — assume permanent
+        return (f"client_error:{status}", False)
+    if status in _TRANSIENT_5XX:
+        if status == 503:
+            return ("service_unavailable", True)
+        if status == 502:
+            return ("bad_gateway", True)
+        if status == 504:
+            return ("gateway_timeout", True)
+        return (f"server_transient:{status}", True)
+    if status in _PERMANENT_5XX:
+        return (f"server_permanent:{status}", False)
+    if 500 <= status < 600:
+        # Unknown 5xx — assume transient (server may recover)
+        return (f"server_error:{status}", True)
+    return (f"unknown:{status}", False)
+
+
+# ---------------------------------------------------------------------------
 # Serialization helpers
 # ---------------------------------------------------------------------------
 
@@ -240,6 +366,15 @@ class OutputForwarder:
         self._request_timeout = out_cfg.get("request_timeout_seconds", 30)
         self._follow_redirects = out_cfg.get("follow_redirects", False)
 
+        # §3.14: retry_on_conflict config
+        self._retry_on_conflict = out_cfg.get("retry_on_conflict", False)
+
+        # Flags for first-occurrence logging of permanent errors
+        self._output_auth_failure_warned = False
+        self._media_type_warned = False
+        self._permanent_5xx_warned: dict[int, bool] = {}  # Track per-status
+        self._ssl_failure_logged = False
+
         self._ssl_ctx = None
         if out_cfg.get("accept_self_signed_certs", False):
             import ssl as _ssl
@@ -270,13 +405,16 @@ class OutputForwarder:
         self._extra_headers = req_opts.get("headers", {})
 
         # Output-specific retry (separate from the gateway retry)
+        # Default retry_on_status covers transient 5xx; transient 4xx (404,
+        # 408, 429, etc.) are handled automatically by classify_http_status()
+        # inside RetryableHTTP.request() regardless of this list.
         out_retry = out_cfg.get(
             "retry",
             {
                 "max_retries": 3,
                 "backoff_base_seconds": 1,
                 "backoff_max_seconds": 30,
-                "retry_on_status": [500, 502, 503, 504],
+                "retry_on_status": [500, 502, 503, 504, 507],
             },
         )
         _http_cls = retryable_http_cls or _RetryableHTTPLazy
@@ -315,7 +453,7 @@ class OutputForwarder:
             ic("send: None doc – skipped", method)
             log_event(
                 logger,
-                "info",
+                "debug",
                 "OUTPUT",
                 "received None doc – skipped",
                 doc_id="unknown",
@@ -355,7 +493,7 @@ class OutputForwarder:
         if self._dry_run:
             log_event(
                 logger,
-                "info",
+                "debug",
                 "OUTPUT",
                 "dry run",
                 operation=infer_operation(doc=doc, method=method),
@@ -387,7 +525,7 @@ class OutputForwarder:
             if self._ssl_ctx is not None:
                 request_kwargs["ssl"] = self._ssl_ctx
             if method == "DELETE" and not self._send_delete_body:
-                pass
+                body_len = 0
             else:
                 request_kwargs["data"] = body
                 merged_headers["Content-Type"] = content_type
@@ -434,7 +572,20 @@ class OutputForwarder:
 
         except _ClientHTTPError as exc:
             elapsed_ms = (time.monotonic() - t_start) * 1000
-            ic("send: client HTTP error", doc_id, exc.status, exc.body[:200])
+            error_class, is_transient = classify_http_status(exc.status)
+
+            # §3.14: Support retry_on_conflict — 409 becomes transient if enabled
+            if self._retry_on_conflict and exc.status == 409:
+                is_transient = True
+                error_class = "conflict_retryable"
+
+            ic(
+                "send: client HTTP error",
+                doc_id,
+                exc.status,
+                error_class,
+                exc.body[:200],
+            )
             await self._record_time(elapsed_ms)
             if self._metrics:
                 self._metrics.inc("outbound_auth_total")
@@ -447,16 +598,75 @@ class OutputForwarder:
                 self._metrics.inc(f"output_{mk}_errors_total")
                 self._metrics.inc("bytes_output_total", body_len)
                 self._metrics.record_output_response_time(elapsed_ms / 1000)
+
+            # §3.6: Handle auth failures (401/403) — first failure logs CRITICAL,
+            # upgrade to halt when halt_on_failure=false
+            if exc.status in (401, 403) and not self._output_auth_failure_warned:
+                log_event(
+                    logger,
+                    "critical",
+                    "OUTPUT",
+                    "Output endpoint authentication failed (HTTP %d) — every document will fail with the same credentials. "
+                    "Fix 'target_auth' in output config and restart the job."
+                    % exc.status,
+                    doc_id=doc_id,
+                    status=exc.status,
+                )
+                self._output_auth_failure_warned = True
+                # §3.6: Upgrade to halt when halt_on_failure=false + auth failure
+                if not self._halt_on_failure:
+                    if self._metrics:
+                        self._metrics.set("output_endpoint_up", 0)
+                    raise OutputEndpointDown(
+                        f"Output auth failure (HTTP {exc.status}) — halting to prevent DLQ flood. "
+                        f"Fix credentials and restart."
+                    )
+            elif exc.status in (401, 403):
+                # Subsequent auth failures logged at DEBUG
+                log_event(
+                    logger,
+                    "debug",
+                    "OUTPUT",
+                    "output auth failure",
+                    doc_id=doc_id,
+                    status=exc.status,
+                )
+            # §3.13: Handle 415 (Unsupported Media Type)
+            elif exc.status == 415 and not self._media_type_warned:
+                log_event(
+                    logger,
+                    "critical",
+                    "OUTPUT",
+                    "Output endpoint rejected Content-Type '%s' (HTTP 415 Unsupported Media Type). "
+                    "Check 'output_format' in output config — the endpoint does not accept '%s' format."
+                    % (content_type, self._output_format),
+                    doc_id=doc_id,
+                    status=415,
+                    content_type=content_type,
+                )
+                self._media_type_warned = True
+            elif exc.status == 415:
+                log_event(
+                    logger,
+                    "debug",
+                    "OUTPUT",
+                    "output 415 repeat",
+                    doc_id=doc_id,
+                    content_type=content_type,
+                )
+
             log_event(
                 logger,
                 "error",
                 "OUTPUT",
-                "client error (4xx)",
+                "client error (4xx %s)"
+                % ("retryable" if is_transient else "permanent"),
                 operation=infer_operation(doc=doc, method=method),
                 doc_id=doc_id,
                 http_method=method,
                 url=url,
                 status=exc.status,
+                error_class=error_class,
                 elapsed_ms=round(elapsed_ms, 1),
                 error_detail=exc.body[:500],
             )
@@ -466,7 +676,9 @@ class OutputForwarder:
                 "method": method,
                 "status": exc.status,
                 "error": exc.body[:500],
+                "error_class": error_class,
                 "data_error_action": self._data_error_action,
+                "retryable": is_transient,
             }
 
         except _RedirectHTTPError as exc:
@@ -523,6 +735,46 @@ class OutputForwarder:
                 self._metrics.inc(f"output_{mk}_errors_total")
                 self._metrics.inc("bytes_output_total", body_len)
                 self._metrics.record_output_response_time(elapsed_ms / 1000)
+
+            # §3.4: Log permanent 5xx (501, 505, 506, 508, 510, 511) with special messages
+            if exc.status == 501 and not self._permanent_5xx_warned.get(501):
+                log_event(
+                    logger,
+                    "critical",
+                    "OUTPUT",
+                    "Output endpoint returned 501 Not Implemented for %s — the endpoint does not support this HTTP method. "
+                    "Check 'write_method' / 'delete_method' in output config." % method,
+                    status=exc.status,
+                    method=method,
+                )
+                self._permanent_5xx_warned[501] = True
+            elif exc.status in (
+                505,
+                506,
+                508,
+                510,
+                511,
+            ) and not self._permanent_5xx_warned.get(exc.status):
+                log_event(
+                    logger,
+                    "warn",
+                    "OUTPUT",
+                    "Output endpoint returned permanent %d — server configuration issue. "
+                    "All docs using this method will fail." % exc.status,
+                    status=exc.status,
+                )
+                self._permanent_5xx_warned[exc.status] = True
+            elif exc.status in (501, 505, 506, 508, 510, 511):
+                # Subsequent occurrences logged at DEBUG
+                log_event(
+                    logger,
+                    "debug",
+                    "OUTPUT",
+                    "permanent 5xx",
+                    doc_id=doc_id,
+                    status=exc.status,
+                )
+
             log_event(
                 logger,
                 "error",
@@ -808,7 +1060,7 @@ class OutputForwarder:
             )
             return False
 
-    def log_stats(self) -> None:
+    def log_stats(self, force_info: bool = False) -> None:
         """Log accumulated response time statistics."""
         if not self._log_response_times or not self._resp_times:
             return
@@ -818,7 +1070,7 @@ class OutputForwarder:
         hi = max(self._resp_times)
         log_event(
             logger,
-            "info",
+            "info" if force_info else "debug",
             "OUTPUT",
             "output stats: %d requests | avg=%.1fms | min=%.1fms | max=%.1fms"
             % (n, avg, lo, hi),
@@ -1037,7 +1289,7 @@ class DeadLetterQueue:
                 seq=str(seq),
                 storage="cbl",
                 ttl_seconds=self._retention_seconds,
-                target_url=target_url,
+                url=target_url,
             )
             return
         # Original file fallback
@@ -1092,7 +1344,7 @@ class DeadLetterQueue:
             self._store.delete_dlq_entry(dlq_id)
             log_event(
                 logger,
-                "info",
+                "debug",
                 "DLQ",
                 "entry purged after successful reprocessing",
                 operation="DELETE",

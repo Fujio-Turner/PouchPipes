@@ -10,6 +10,9 @@ psutil>=5.9,<7
 #   pip install pymongo     # for output_format=bson (provides bson module)
 #   pip install pyyaml      # for output_format=yaml
 
+# Eventing (JS handlers via V8)
+mini-racer>=0.12           # embedded V8 for sandboxed JS execution (import: py_mini_racer)
+
 # System metrics
 psutil>=5.9                # CPU, memory, disk, network, threads
 

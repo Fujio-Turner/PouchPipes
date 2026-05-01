@@ -9,6 +9,7 @@ strategy, crash recovery, and logging conventions.
 - [`SOURCE_TYPES.md`](SOURCE_TYPES.md) — Compatibility matrix across SG / App Services / Edge Server / CouchDB
 - [`LOGGING.md`](LOGGING.md) — Logging architecture, log keys, structured fields
 - [`CONFIGURATION.md`](CONFIGURATION.md) — Full config.json reference
+- [`FAILURE_OPTION_OUTPUT_RDBMS.md`](FAILURE_OPTION_OUTPUT_RDBMS.md) — Failure analysis & resolutions (checkpoint save resilience §4.1)
 
 ---
 
@@ -489,6 +490,8 @@ The `_changes` processing uses structured `log_event()` calls with the
 This split avoids flooding INFO logs with checkpoint document IDs and
 sequence values on every save (which can happen thousands of times per
 run), while keeping the detail available in DEBUG for troubleshooting.
+
+**Checkpoint save resilience:** Checkpoint save failures are now non-fatal. If `checkpoint.save()` fails after retries, the pipeline continues with the in-memory `since` value and retries on the next batch. A `WARNING` is logged on failure. The worst case on restart is re-processing docs since the last successful save (at-least-once delivery). See [FAILURE_OPTION_OUTPUT_RDBMS.md §4.1](FAILURE_OPTION_OUTPUT_RDBMS.md).
 
 ### `PROCESSING` Log Key
 

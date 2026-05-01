@@ -60,7 +60,7 @@ All metrics use the `changes_worker_` prefix and carry two default labels:
 | # | Metric | Type | Description |
 |---|--------|------|-------------|
 | 14 | `changes_worker_bytes_received_total` | **counter** | Bytes from `_changes`, `_bulk_get`, and individual doc GETs. |
-| 15 | `changes_worker_bytes_output_total` | **counter** | Bytes sent to the output endpoint. |
+| 15 | `changes_worker_bytes_output_total` | **counter** | Bytes sent to the output. For HTTP/Cloud outputs this is the request body size; for RDBMS outputs this is the generated SQL statement + parameter size (including DELETE operations). |
 
 ---
 
@@ -244,45 +244,71 @@ All metrics use the `changes_worker_` prefix and carry two default labels:
 
 ---
 
-## 19 — System / Process Metrics
+## 19 — Eventing Metrics (JS Handlers)
 
 | # | Metric | Type | Description |
 |---|--------|------|-------------|
-| 91 | `changes_worker_process_cpu_percent` | **gauge** | Worker process CPU usage (% of one core). |
-| 92 | `changes_worker_process_cpu_user_seconds_total` | **counter** | User-space CPU seconds consumed. |
-| 93 | `changes_worker_process_cpu_system_seconds_total` | **counter** | Kernel-space CPU seconds consumed. |
-| 94 | `changes_worker_process_memory_rss_bytes` | **gauge** | Resident Set Size (physical RAM). |
-| 95 | `changes_worker_process_memory_vms_bytes` | **gauge** | Virtual Memory Size. |
-| 96 | `changes_worker_process_memory_percent` | **gauge** | % of host RAM used by worker. |
-| 97 | `changes_worker_process_threads` | **gauge** | OS threads in the worker process. |
-| 98 | `changes_worker_process_open_fds` | **gauge** | Open file descriptors (Linux/macOS only). |
-| 99 | `changes_worker_python_threads_active` | **gauge** | Active Python threads. |
-| 100 | `changes_worker_python_gc_gen{0,1,2}_count` | **gauge** | Objects tracked by GC generation 0/1/2. |
-| 101 | `changes_worker_python_gc_gen{0,1,2}_collections_total` | **counter** | GC collection runs per generation. |
-| 102 | `changes_worker_system_cpu_count` | **gauge** | Logical CPU cores on the host. |
-| 103 | `changes_worker_system_cpu_percent` | **gauge** | Host-wide CPU usage %. |
-| 104 | `changes_worker_system_memory_total_bytes` | **gauge** | Total physical memory. |
-| 105 | `changes_worker_system_memory_available_bytes` | **gauge** | Available physical memory. |
-| 106 | `changes_worker_system_memory_used_bytes` | **gauge** | Used physical memory. |
-| 107 | `changes_worker_system_memory_percent` | **gauge** | Host memory usage %. |
-| 108 | `changes_worker_system_swap_total_bytes` | **gauge** | Total swap space. |
-| 109 | `changes_worker_system_swap_used_bytes` | **gauge** | Used swap space. |
-| 110 | `changes_worker_system_disk_total_bytes` | **gauge** | Total disk space. |
-| 111 | `changes_worker_system_disk_used_bytes` | **gauge** | Used disk space. |
-| 112 | `changes_worker_system_disk_free_bytes` | **gauge** | Free disk space. |
-| 113 | `changes_worker_system_disk_percent` | **gauge** | Disk usage %. |
-| 114 | `changes_worker_system_network_bytes_sent_total` | **counter** | Total bytes sent (all NICs). |
-| 115 | `changes_worker_system_network_bytes_recv_total` | **counter** | Total bytes received (all NICs). |
-| 116 | `changes_worker_system_network_packets_sent_total` | **counter** | Total packets sent. |
-| 117 | `changes_worker_system_network_packets_recv_total` | **counter** | Total packets received. |
-| 118 | `changes_worker_system_network_errin_total` | **counter** | Incoming network errors. |
-| 119 | `changes_worker_system_network_errout_total` | **counter** | Outgoing network errors. |
-| 120 | `changes_worker_log_dir_size_bytes` | **gauge** | Total size of the `logs/` directory. |
-| 121 | `changes_worker_cbl_db_size_bytes` | **gauge** | Total size of the Couchbase Lite database on disk. |
+| 91 | `changes_worker_eventing_invocations_total` | **counter** | Total handler calls (OnUpdate + OnDelete). |
+| 92 | `changes_worker_eventing_updates_total` | **counter** | OnUpdate calls. |
+| 93 | `changes_worker_eventing_deletes_total` | **counter** | OnDelete calls. |
+| 94 | `changes_worker_eventing_passed_total` | **counter** | Documents that passed through (truthy return). |
+| 95 | `changes_worker_eventing_rejected_total` | **counter** | Documents rejected by handler (falsy/void return). |
+| 96 | `changes_worker_eventing_errors_total` | **counter** | JS exceptions (on_error policy applied). |
+| 97 | `changes_worker_eventing_timeouts_total` | **counter** | Handler exceeded timeout_ms (on_timeout policy applied). |
+| 98 | `changes_worker_eventing_halts_total` | **counter** | `on_error=halt` or `on_timeout=halt` triggered — job stopped. |
+| 99 | `changes_worker_eventing_v8_heap_used_bytes` | **gauge** | V8 isolate heap used bytes (sampled every 100 invocations). |
+| 100 | `changes_worker_eventing_v8_heap_total_bytes` | **gauge** | V8 isolate heap total bytes. |
+| 101 | `changes_worker_eventing_handler_duration_seconds` | **summary** | Time spent in JS handler per invocation (p50, p90, p99). |
 
 ---
 
-## 20 — Per-Engine / Per-Job DB Metrics
+## 20 — Recursion Guard Metrics
+
+| # | Metric | Type | Description |
+|---|--------|------|-------------|
+| 102 | `changes_worker_recursion_guard_suppressed_total` | **counter** | Changes suppressed by the recursion guard (write-back echo detected and skipped). |
+
+---
+
+## 21 — System / Process Metrics
+
+| # | Metric | Type | Description |
+|---|--------|------|-------------|
+| 103 | `changes_worker_process_cpu_percent` | **gauge** | Worker process CPU usage (% of one core). |
+| 104 | `changes_worker_process_cpu_user_seconds_total` | **counter** | User-space CPU seconds consumed. |
+| 105 | `changes_worker_process_cpu_system_seconds_total` | **counter** | Kernel-space CPU seconds consumed. |
+| 106 | `changes_worker_process_memory_rss_bytes` | **gauge** | Resident Set Size (physical RAM). |
+| 107 | `changes_worker_process_memory_vms_bytes` | **gauge** | Virtual Memory Size. |
+| 108 | `changes_worker_process_memory_percent` | **gauge** | % of host RAM used by worker. |
+| 109 | `changes_worker_process_threads` | **gauge** | OS threads in the worker process. |
+| 110 | `changes_worker_process_open_fds` | **gauge** | Open file descriptors (Linux/macOS only). |
+| 111 | `changes_worker_python_threads_active` | **gauge** | Active Python threads. |
+| 112 | `changes_worker_python_gc_gen{0,1,2}_count` | **gauge** | Objects tracked by GC generation 0/1/2. |
+| 113 | `changes_worker_python_gc_gen{0,1,2}_collections_total` | **counter** | GC collection runs per generation. |
+| 114 | `changes_worker_system_cpu_count` | **gauge** | Logical CPU cores on the host. |
+| 115 | `changes_worker_system_cpu_percent` | **gauge** | Host-wide CPU usage %. |
+| 116 | `changes_worker_system_memory_total_bytes` | **gauge** | Total physical memory. |
+| 117 | `changes_worker_system_memory_available_bytes` | **gauge** | Available physical memory. |
+| 118 | `changes_worker_system_memory_used_bytes` | **gauge** | Used physical memory. |
+| 119 | `changes_worker_system_memory_percent` | **gauge** | Host memory usage %. |
+| 120 | `changes_worker_system_swap_total_bytes` | **gauge** | Total swap space. |
+| 121 | `changes_worker_system_swap_used_bytes` | **gauge** | Used swap space. |
+| 122 | `changes_worker_system_disk_total_bytes` | **gauge** | Total disk space. |
+| 123 | `changes_worker_system_disk_used_bytes` | **gauge** | Used disk space. |
+| 124 | `changes_worker_system_disk_free_bytes` | **gauge** | Free disk space. |
+| 125 | `changes_worker_system_disk_percent` | **gauge** | Disk usage %. |
+| 126 | `changes_worker_system_network_bytes_sent_total` | **counter** | Total bytes sent (all NICs). |
+| 127 | `changes_worker_system_network_bytes_recv_total` | **counter** | Total bytes received (all NICs). |
+| 128 | `changes_worker_system_network_packets_sent_total` | **counter** | Total packets sent. |
+| 129 | `changes_worker_system_network_packets_recv_total` | **counter** | Total packets received. |
+| 130 | `changes_worker_system_network_errin_total` | **counter** | Incoming network errors. |
+| 131 | `changes_worker_system_network_errout_total` | **counter** | Outgoing network errors. |
+| 132 | `changes_worker_log_dir_size_bytes` | **gauge** | Total size of the `logs/` directory. |
+| 133 | `changes_worker_cbl_db_size_bytes` | **gauge** | Total size of the Couchbase Lite database on disk. |
+
+---
+
+## 22 — Per-Engine / Per-Job DB Metrics
 
 When using RDBMS output (Postgres, MySQL, Oracle, MSSQL), the `DbMetrics` proxy emits labeled counters with `engine` and `job_id` labels alongside the global totals.
 
@@ -299,7 +325,7 @@ changes_worker_db_output_requests_total{engine="oracle",job_id="analytics"} 200
 
 ---
 
-## 21 — Per-Provider / Per-Job Cloud Metrics
+## 23 — Per-Provider / Per-Job Cloud Metrics
 
 When using Cloud output (S3, etc.), the `CloudMetrics` proxy emits labeled counters with `provider` and `job_id` labels.
 

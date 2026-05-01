@@ -33,22 +33,36 @@ except ImportError:
 # SQL Server error numbers that are transient (worth retrying).
 _TRANSIENT_MSSQL_CODES = frozenset(
     {
-        -1,  # General network error / connection failure
-        2,  # Timeout expired
-        53,  # Named pipe provider: could not open connection
-        233,  # Connection was forcibly closed
-        258,  # Timeout waiting for login response
-        1205,  # Deadlock victim
-        10054,  # Connection reset by peer
-        10060,  # Connection timed out
-        10061,  # Connection refused
-        40143,  # Connection could not be initialized
-        40197,  # Service encountered an error processing your request
-        40501,  # Service busy
-        40613,  # Database is currently unavailable
-        49918,  # Cannot process request: not enough resources
-        49919,  # Cannot process create/update request
-        49920,  # Cannot process request: too many operations in progress
+        # Connection / network
+        -1,  # general network error / connection failure
+        53,  # named pipe provider: could not open connection
+        64,  # network name no longer available
+        233,  # connection was forcibly closed
+        10053,  # connection aborted
+        10054,  # connection reset by peer
+        10060,  # connection timed out
+        10061,  # connection refused
+        # Timeout
+        2,  # timeout expired
+        258,  # timeout waiting for login response
+        # Lock / deadlock
+        1205,  # deadlock victim
+        1222,  # lock request timeout exceeded
+        # Resource exhaustion
+        701,  # insufficient system memory
+        # Schema (may be recreated)
+        208,  # invalid object name — table may be recreated
+        # Azure SQL / service
+        40143,  # connection could not be initialized
+        40197,  # service encountered an error processing your request
+        40501,  # service busy / throttling
+        40540,  # transient service-side processing error
+        40613,  # database is currently unavailable
+        10928,  # resource limit reached
+        10929,  # too many requests / resource governance
+        49918,  # cannot process request: not enough resources
+        49919,  # cannot process create/update request
+        49920,  # cannot process request: too many operations in progress
     }
 )
 
@@ -132,12 +146,6 @@ class MSSQLOutputForwarder(BaseOutputForwarder):
             pool.close()
             await pool.wait_closed()
             log_event(logger, "info", "OUTPUT", "MSSQL pool closed")
-
-    async def _reconnect_pool(self) -> None:
-        ic("_reconnect_pool")
-        async with self._pool_lock:
-            await self._close_pool()
-            await self._connect_pool()
 
     # ── MSSQL SQL generation helpers ────────────────────────────────────
 
@@ -269,18 +277,56 @@ class MSSQLOutputForwarder(BaseOutputForwarder):
             return "connection"
         code = _mssql_error_code(exc)
         if code is not None:
-            if code in (-1, 53, 233, 10054, 10060, 10061, 40143, 40197, 40613):
+            # Connection / network
+            if code in (
+                -1,
+                53,
+                64,
+                233,
+                10053,
+                10054,
+                10060,
+                10061,
+                40143,
+                40197,
+                40613,
+            ):
                 return "connection"
+            # Timeout
             if code in (2, 258):
                 return "timeout"
+            # Lock / deadlock
             if code == 1205:
                 return "deadlock"
-            if code in (2601, 2627, 547, 515):
+            if code == 1222:
+                return "lock_contention"
+            # Resource exhaustion
+            if code in (701, 10928, 10929, 40501, 40540, 49918, 49919, 49920):
+                return "resource_exhaustion"
+            # Constraint violations
+            if code in (2601, 2627):
                 return "constraint_violation"
-            if code in (245, 8114, 8115):
+            if code in (515, 544):
+                return "constraint_violation"
+            if code == 547:
+                return "constraint_violation"
+            if code == 2714:
+                return "constraint_violation"
+            # Data type errors
+            if code in (206, 241, 242, 245, 8114, 8115, 8152, 2628):
                 return "data_type"
-            if code in (207, 208, 102):
+            # Schema (table may be recreated)
+            if code == 208:
+                return "table_not_found"
+            # Syntax / schema (permanent)
+            if code in (207, 102, 213, 8102):
                 return "syntax_or_schema"
+            # Auth / permission (permanent)
+            if code in (229, 18456):
+                return "auth_failure"
+            # Database config (permanent)
+            if code == 4060:
+                return "invalid_database"
             return f"mssql_{code}"
         return "unknown"
 

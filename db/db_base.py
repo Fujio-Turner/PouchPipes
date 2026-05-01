@@ -260,10 +260,13 @@ class BaseOutputForwarder(abc.ABC):
         _connect_pool()  – create the async connection pool
         _close_pool()    – close the pool
         _execute_ops()   – acquire conn, run ops inside a transaction
-        _reconnect_pool()– close + re-create the pool on connection errors
         _test_connection()– run a simple health query (SELECT 1)
         _is_transient()  – classify whether an exception is retryable
         _error_class()   – return a short error classification string
+
+    Provided by this base class:
+        _reconnect_pool()– resilient close + re-create with stampede
+                           protection, cooldown, and background health check
     """
 
     def __init__(self, out_cfg: dict, dry_run: bool = False, metrics=None):
@@ -311,6 +314,13 @@ class BaseOutputForwarder(abc.ABC):
         self._resp_times: deque[float] = deque(maxlen=10_000)
         self._lock = asyncio.Lock()
         self._pool_lock = asyncio.Lock()
+        self._pool_generation = 0
+        self._pool_reconnecting = False
+        self._pool_reconnect_time: float = 0.0  # monotonic timestamp of last attempt
+        self._health_task: asyncio.Task | None = None
+        self._no_mapping_warned = False
+        self._reconnect_event: asyncio.Event = asyncio.Event()
+        self._reconnect_event.set()  # start as "not reconnecting"
 
     def _init_metrics(self) -> None:
         """Call from subclass __init__ after the engine property is available."""
@@ -493,6 +503,7 @@ class BaseOutputForwarder(abc.ABC):
                 seen_matches[key] = src
 
         self._mappers = new_mappers
+        self._no_mapping_warned = False
         ic("_load_mappers: done", len(self._mappers))
 
     def _build_validators_from_mapping(self, mapping_def: dict) -> None:
@@ -628,9 +639,154 @@ class BaseOutputForwarder(abc.ABC):
     async def _close_pool(self) -> None:
         """Close the async connection pool."""
 
-    @abc.abstractmethod
-    async def _reconnect_pool(self) -> None:
-        """Close and re-create the pool (called on connection errors)."""
+    async def _reconnect_pool(self, _generation: int | None = None) -> None:
+        """Close and re-create the pool (called on connection errors).
+
+        Includes stampede protection, cooldown, generation-bump on failure,
+        and a background health-check that keeps trying to restore a dead pool.
+        """
+        import time as _time
+
+        # Fast path: if another task already reconnected *successfully*, skip.
+        # The pool must be alive — if it's None the other task's reconnect
+        # failed and we must not silently return.
+        if (
+            _generation is not None
+            and _generation != self._pool_generation
+            and self._pool is not None
+        ):
+            return
+
+        # If another task is already reconnecting, wait on the event instead
+        # of spin-looping.  The event is set when the reconnecting task
+        # finishes (success or failure), waking all waiters at once.
+        if self._pool_reconnecting:
+            try:
+                await asyncio.wait_for(self._reconnect_event.wait(), timeout=10.0)
+            except asyncio.TimeoutError:
+                pass
+            # Check if the generation advanced AND pool is alive (reconnect succeeded)
+            if (
+                _generation is not None
+                and _generation != self._pool_generation
+                and self._pool is not None
+            ):
+                return
+
+        async with self._pool_lock:
+            # Re-check after acquiring lock — only skip if pool is actually alive
+            if (
+                _generation is not None
+                and _generation != self._pool_generation
+                and self._pool is not None
+            ):
+                return
+
+            # Cooldown: don't attempt reconnect more than once per second
+            # BUT: if the pool is None (previous reconnect failed mid-way),
+            # always allow the attempt — we must try to restore the pool.
+            now = _time.monotonic()
+            if self._pool is not None and now - self._pool_reconnect_time < 1.0:
+                return
+
+            self._pool_reconnecting = True
+            self._reconnect_event.clear()
+            self._pool_reconnect_time = now
+            try:
+                await self._close_pool()
+                await self._connect_pool()
+                self._pool_generation += 1
+            except Exception:
+                # connect failed — pool is None (close already ran).
+                # Bump generation so callers holding a stale generation
+                # don't skip the next reconnect attempt.
+                self._pool_generation += 1
+                self._ensure_health_check()
+                raise
+            finally:
+                self._pool_reconnecting = False
+                self._reconnect_event.set()
+
+    # ── Background health check ───────────────────────────────────────────
+
+    def _ensure_health_check(self) -> None:
+        """Start the background health-check task if not already running."""
+        if self._health_task and not self._health_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            self._health_task = loop.create_task(self._health_check_loop())
+        except RuntimeError:
+            pass  # no running loop — skip
+
+    async def _health_check_loop(self) -> None:
+        """Periodically try to restore a dead pool.
+
+        Runs with exponential backoff (2s → 300s) while the pool is None.
+        Stops once the pool is successfully recreated.
+        """
+        attempt = 0
+        while True:
+            attempt += 1
+            delay = min(2**attempt, 300)
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+
+            if self._pool is not None:
+                log_event(
+                    logger,
+                    "info",
+                    "OUTPUT",
+                    "health check: pool is alive, stopping monitor",
+                    mode=self._engine,
+                )
+                return
+
+            log_event(
+                logger,
+                "info",
+                "OUTPUT",
+                "health check: pool is dead, attempting reconnect "
+                "(attempt %d, next in %ds)" % (attempt, min(2 ** (attempt + 1), 300)),
+                mode=self._engine,
+            )
+            try:
+                async with self._pool_lock:
+                    if self._pool is not None:
+                        return  # restored between check and lock
+                    self._pool_reconnecting = True
+                    self._reconnect_event.clear()
+                    try:
+                        await self._connect_pool()
+                        self._pool_generation += 1
+                    except Exception:
+                        self._pool_generation += 1
+                        raise
+                    finally:
+                        self._pool_reconnecting = False
+                        self._reconnect_event.set()
+
+                log_event(
+                    logger,
+                    "info",
+                    "OUTPUT",
+                    "health check: pool restored successfully",
+                    mode=self._engine,
+                    operation="RECONNECT",
+                )
+                return
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                log_event(
+                    logger,
+                    "debug",
+                    "OUTPUT",
+                    "health check: reconnect failed: %s" % exc,
+                    mode=self._engine,
+                )
 
     async def connect(self) -> None:
         """Create the connection pool and load schema mappings."""
@@ -648,6 +804,13 @@ class BaseOutputForwarder(abc.ABC):
 
     async def close(self) -> None:
         """Close the connection pool and unregister metrics."""
+        if (
+            hasattr(self, "_health_task")
+            and self._health_task
+            and not self._health_task.done()
+        ):
+            self._health_task.cancel()
+            self._health_task = None
         ic("close", self._engine)
         try:
             async with self._pool_lock:
@@ -722,7 +885,7 @@ class BaseOutputForwarder(abc.ABC):
         if doc is None:
             log_event(
                 logger,
-                "info",
+                "debug",
                 "OUTPUT",
                 "received None doc – skipped",
                 doc_id="unknown",
@@ -735,13 +898,15 @@ class BaseOutputForwarder(abc.ABC):
         is_delete = method == "DELETE"
 
         if not self._mappers:
-            log_event(
-                logger,
-                "warn",
-                "MAPPING",
-                "no schema mapping loaded – skipping doc",
-                doc_id=doc_id,
-            )
+            if not self._no_mapping_warned:
+                log_event(
+                    logger,
+                    "warn",
+                    "MAPPING",
+                    "No schema mappings loaded — all documents will be skipped "
+                    "until mappings are configured.",
+                )
+                self._no_mapping_warned = True
             if self._metrics:
                 self._metrics.inc("output_skipped_total")
             return {
@@ -863,7 +1028,7 @@ class BaseOutputForwarder(abc.ABC):
                 sql, params = op.to_sql()
                 log_event(
                     logger,
-                    "info",
+                    "debug",
                     "OUTPUT",
                     "[DRY RUN] %s | params=%s" % (sql, params),
                     doc_id=doc_id,
@@ -873,6 +1038,7 @@ class BaseOutputForwarder(abc.ABC):
         # -- Execute with retry for transient errors --
         t_start = time.monotonic()
         last_exc: Exception | None = None
+        pool_gen = self._pool_generation
 
         for attempt in range(1, self._max_retries + 1):
             try:
@@ -887,17 +1053,18 @@ class BaseOutputForwarder(abc.ABC):
                     self._metrics.inc("output_success_total")
                     self._metrics.inc("mapper_ops_total", len(ops))
                     self._metrics.record_output_response_time(elapsed_ms / 1000)
-                    # Estimate bytes sent to the database
-                    body_len = 0
+                    # Measure bytes from generated SQL + params for accurate
+                    # bytes_output_total tracking (applies to all op types
+                    # including DELETE).
+                    sql_bytes = 0
                     for op in ops:
                         sql, params = op.to_sql()
-                        body_len += len(sql.encode("utf-8"))
+                        sql_bytes += len(sql.encode("utf-8"))
                         for p in params:
-                            body_len += (
-                                len(str(p).encode("utf-8")) if p is not None else 0
-                            )
+                            sql_bytes += len(str(p).encode("utf-8"))
+                    self._metrics.inc("bytes_output_total", sql_bytes)
                     if self._metrics_global:
-                        self._metrics_global.inc("bytes_output_total", body_len)
+                        self._metrics_global.inc("output_ops_total", len(ops))
 
                 doc_rev = doc.get("_rev", doc.get("rev", "?"))
                 ic("send: OK", doc_id, len(ops), round(elapsed_ms, 1))
@@ -967,10 +1134,10 @@ class BaseOutputForwarder(abc.ABC):
                     self._metrics.inc("db_transient_errors_total")
                     self._metrics.inc("db_retries_total")
 
-                if eclass == "connection":
+                if eclass in ("connection", "table_not_found", "server_shutdown"):
                     try:
                         ic(
-                            "send: connection error, reconnecting",
+                            "send: %s error, reconnecting" % eclass,
                             doc_id,
                             attempt,
                             self._max_retries,
@@ -979,16 +1146,20 @@ class BaseOutputForwarder(abc.ABC):
                             logger,
                             "warn",
                             "OUTPUT",
-                            "connection error – reconnecting pool",
+                            "%s error – reconnecting pool" % eclass,
                             doc_id=doc_id,
                             mode=self._engine,
                             attempt=attempt,
                             error_detail=f"{type(exc).__name__}: {exc}",
                         )
-                        await self._reconnect_pool()
+                        await self._reconnect_pool(_generation=pool_gen)
+                        pool_gen = self._pool_generation
                         if self._metrics:
                             self._metrics.inc("db_pool_reconnects_total")
                     except Exception as reconn_exc:
+                        # Update pool_gen so the next retry attempt doesn't
+                        # skip reconnection via the stale-generation fast path.
+                        pool_gen = self._pool_generation
                         ic(
                             "send: pool reconnect failed",
                             type(reconn_exc).__name__,
@@ -1067,7 +1238,7 @@ class BaseOutputForwarder(abc.ABC):
 
     # ── stats logging ───────────────────────────────────────────────────
 
-    def log_stats(self) -> None:
+    def log_stats(self, force_info: bool = False) -> None:
         """Log accumulated response time statistics."""
         if not self._resp_times:
             return
@@ -1077,7 +1248,7 @@ class BaseOutputForwarder(abc.ABC):
         hi = max(self._resp_times)
         log_event(
             logger,
-            "info",
+            "info" if force_info else "debug",
             "OUTPUT",
             "%s stats: %d ops | avg=%.1fms | min=%.1fms | max=%.1fms"
             % (self._engine.upper(), n, avg, lo, hi),

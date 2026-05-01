@@ -22,7 +22,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zipfile import ZipFile
 
-logger = logging.getLogger(__name__)
+from pipeline.pipeline_logging import log_event
+
+logger = logging.getLogger("changes_worker")
 
 
 class DiagnosticsCollector:
@@ -69,13 +71,23 @@ class DiagnosticsCollector:
 
             # Create zip *outside* the staging dir so cleanup doesn't delete it
             zip_path = await self._create_zip(collect_root)
-            logger.info(
-                "Diagnostics collection complete: %s (%.1fs)", zip_path, collect_elapsed
+            log_event(
+                logger,
+                "info",
+                "CONTROL",
+                "diagnostics collection complete: %s (%.1fs)"
+                % (os.path.basename(zip_path), collect_elapsed),
             )
             return zip_path
 
         except Exception as e:
-            logger.exception("Error during diagnostics collection: %s", e)
+            log_event(
+                logger,
+                "error",
+                "CONTROL",
+                "error during diagnostics collection",
+                error_detail="%s: %s" % (type(e).__name__, e),
+            )
             raise
         finally:
             # Cleanup staging directory (zip lives outside it)
@@ -105,7 +117,9 @@ class DiagnosticsCollector:
             os.makedirs(project_logs_dir, exist_ok=True)
 
             if not log_dir.exists():
-                logger.debug("Log directory %s does not exist, skipping", log_dir)
+                log_event(
+                    logger, "debug", "CONTROL", "log directory does not exist, skipping"
+                )
                 return
 
             log_files = [p for p in log_dir.glob(f"{log_prefix}*") if p.is_file()]
@@ -131,11 +145,20 @@ class DiagnosticsCollector:
                 collected_size += file_size
                 collected_count += 1
 
-            logger.debug(
-                "Collected %d project log file(s) from %s", collected_count, log_dir
+            log_event(
+                logger,
+                "debug",
+                "CONTROL",
+                "collected %d project log file(s)" % collected_count,
             )
         except Exception as e:
-            logger.warning("Error collecting project logs: %s", e)
+            log_event(
+                logger,
+                "warn",
+                "CONTROL",
+                "error collecting project logs",
+                error_detail="%s: %s" % (type(e).__name__, e),
+            )
             self._write_error_file(collect_root, "project_logs", e)
 
     async def _collect_cbl_logs(self, collect_root: str) -> None:
@@ -147,7 +170,7 @@ class DiagnosticsCollector:
 
             cbl_logs = [p for p in Path(CBL_DB_DIR).glob("*.cbllog*") if p.is_file()]
             if not cbl_logs:
-                logger.debug("No CBL log files found")
+                log_event(logger, "debug", "CONTROL", "no CBL log files found")
                 return
 
             cbl_logs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
@@ -172,11 +195,22 @@ class DiagnosticsCollector:
                 collected_size += file_size
                 collected_count += 1
 
-            logger.debug("Collected %d CBL log file(s)", collected_count)
+            log_event(
+                logger,
+                "debug",
+                "CONTROL",
+                "collected %d CBL log file(s)" % collected_count,
+            )
         except ImportError:
-            logger.debug("CBL not enabled, skipping CBL logs")
+            log_event(logger, "debug", "CONTROL", "CBL not enabled, skipping CBL logs")
         except Exception as e:
-            logger.warning("Error collecting CBL logs: %s", e)
+            log_event(
+                logger,
+                "warn",
+                "CONTROL",
+                "error collecting CBL logs",
+                error_detail="%s: %s" % (type(e).__name__, e),
+            )
             self._write_error_file(collect_root, "cbl_logs", e)
 
     async def _collect_system_info(self, collect_root: str) -> None:
@@ -195,8 +229,11 @@ class DiagnosticsCollector:
             for name, cmd in system_commands.items():
                 # Skip commands that aren't installed in this container/OS
                 if not _shutil.which(cmd[0]):
-                    logger.debug(
-                        "Skipping system command '%s' (%s not found)", name, cmd[0]
+                    log_event(
+                        logger,
+                        "debug",
+                        "CONTROL",
+                        "skipping system command %s (%s not found)" % (name, cmd[0]),
                     )
                     continue
                 try:
@@ -205,15 +242,32 @@ class DiagnosticsCollector:
                     with open(output_file, "w") as f:
                         f.write(result)
                 except Exception as e:
-                    logger.debug("System command '%s' failed: %s", name, e)
+                    log_event(
+                        logger,
+                        "debug",
+                        "CONTROL",
+                        "system command failed: %s" % name,
+                        error_detail=str(e),
+                    )
                     self._write_error_file(system_dir, name, e)
 
             # Write safe env vars (curated allowlist, no secrets)
             self._collect_safe_env(system_dir)
 
-            logger.debug("Collected system info (%d commands)", len(system_commands))
+            log_event(
+                logger,
+                "debug",
+                "CONTROL",
+                "collected system info (%d commands)" % len(system_commands),
+            )
         except Exception as e:
-            logger.warning("Error collecting system info: %s", e)
+            log_event(
+                logger,
+                "warn",
+                "CONTROL",
+                "error collecting system info",
+                error_detail="%s: %s" % (type(e).__name__, e),
+            )
             self._write_error_file(collect_root, "system", e)
 
     async def _collect_profiling(self, collect_root: str) -> None:
@@ -237,9 +291,15 @@ class DiagnosticsCollector:
             # GC stats
             self._collect_gc_stats(profiling_dir)
 
-            logger.debug("Collected profiling data")
+            log_event(logger, "debug", "CONTROL", "collected profiling data")
         except Exception as e:
-            logger.warning("Error collecting profiling data: %s", e)
+            log_event(
+                logger,
+                "warn",
+                "CONTROL",
+                "error collecting profiling data",
+                error_detail="%s: %s" % (type(e).__name__, e),
+            )
             self._write_error_file(collect_root, "profiling", e)
 
     async def _collect_config(self, collect_root: str) -> None:
@@ -268,16 +328,27 @@ class DiagnosticsCollector:
             with open(version_file, "w") as f:
                 json.dump(version_info, f, indent=2)
 
-            logger.debug("Collected config info")
+            log_event(logger, "debug", "CONTROL", "collected config info")
         except Exception as e:
-            logger.warning("Error collecting config: %s", e)
+            log_event(
+                logger,
+                "warn",
+                "CONTROL",
+                "error collecting config",
+                error_detail="%s: %s" % (type(e).__name__, e),
+            )
             self._write_error_file(collect_root, "config", e)
 
     async def _collect_metrics(self, collect_root: str) -> None:
         """Capture Prometheus metrics snapshot."""
         try:
             if not self.metrics:
-                logger.debug("No metrics collector available, skipping metrics")
+                log_event(
+                    logger,
+                    "debug",
+                    "CONTROL",
+                    "no metrics collector available, skipping metrics",
+                )
                 return
 
             metrics_file = os.path.join(collect_root, "metrics_snapshot.txt")
@@ -285,9 +356,15 @@ class DiagnosticsCollector:
             with open(metrics_file, "w") as f:
                 f.write(metrics_output)
 
-            logger.debug("Collected metrics snapshot")
+            log_event(logger, "debug", "CONTROL", "collected metrics snapshot")
         except Exception as e:
-            logger.warning("Error collecting metrics: %s", e)
+            log_event(
+                logger,
+                "warn",
+                "CONTROL",
+                "error collecting metrics",
+                error_detail="%s: %s" % (type(e).__name__, e),
+            )
             self._write_error_file(collect_root, "metrics", e)
 
     async def _collect_status(self, collect_root: str) -> None:
@@ -302,9 +379,15 @@ class DiagnosticsCollector:
             with open(status_file, "w") as f:
                 json.dump(status, f, indent=2)
 
-            logger.debug("Collected status snapshot")
+            log_event(logger, "debug", "CONTROL", "collected status snapshot")
         except Exception as e:
-            logger.warning("Error collecting status: %s", e)
+            log_event(
+                logger,
+                "warn",
+                "CONTROL",
+                "error collecting status",
+                error_detail="%s: %s" % (type(e).__name__, e),
+            )
             self._write_error_file(collect_root, "status", e)
 
     # ─── Helper methods ───────────────────────────────────────────────────

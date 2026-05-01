@@ -30,7 +30,7 @@
         "order_doc_id": "$._id",
         "product_id": {
           "path": "$.product_id",
-          "transform": "toUpperCase($.product_id)"
+          "transform": "toLowerCase($.product_id)"
         },
         "qty": "$.qty",
         "price": "$.price"
@@ -46,7 +46,7 @@
     }
   ],
   "meta": {
-    "updated_at": "2026-04-22T19:33:16.759377+00:00",
+    "updated_at": "2026-04-23T20:26:16.641065+00:00",
     "active": true
   }
 }

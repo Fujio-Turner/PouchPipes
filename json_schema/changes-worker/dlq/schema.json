@@ -38,7 +38,11 @@
     },
     "reason": {
       "type": ["string", "null"],
-      "description": "Category of failure (e.g., 'timeout', 'validation_error', '4xx', '5xx')"
+      "description": "Machine-readable error classification. RDBMS classes: constraint_violation, data_type, syntax_or_schema, table_not_found, auth_failure, invalid_database, read_only, connection, timeout, deadlock, lock_contention, resource_exhaustion, server_shutdown, serialization. HTTP classes: bad_request, auth_failure, conflict, gone, method_or_media, payload_too_large, not_found, client_timeout, rate_limited, service_unavailable, bad_gateway, gateway_timeout, server_permanent:{status}, client_error:{status}. Other: connection_failure, shutdown_inflight, redirect:{status}, unknown."
+    },
+    "error_class": {
+      "type": ["string", "null"],
+      "description": "Structured error class from the output forwarder (e.g., 'table_not_found', 'rate_limited', 'constraint_violation'). Same value as reason when available."
     },
     "time": {
       "type": "integer",
@@ -86,7 +90,8 @@
       "method": "POST",
       "status": 500,
       "error": "Internal Server Error",
-      "reason": "5xx",
+      "reason": "service_unavailable",
+      "error_class": "service_unavailable",
       "time": 1705324200,
       "expires_at": 1705410600,
       "retried": false,

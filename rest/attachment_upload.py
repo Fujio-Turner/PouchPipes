@@ -114,7 +114,7 @@ class AttachmentUploader:
                     log_event(
                         logger,
                         "warn",
-                        "PROCESSING",
+                        "ATTACHMENT",
                         "attachment upload failed: %s – %s" % (name, exc),
                         doc_id=doc.get("_id", doc.get("id", "<unknown>")),
                     )
@@ -190,7 +190,7 @@ class AttachmentUploader:
                 log_event(
                     logger,
                     "debug",
-                    "PROCESSING",
+                    "ATTACHMENT",
                     "uploaded attachment %s → %s (%.1fms)"
                     % (name, dest_type, elapsed * 1000),
                     doc_id=doc.get("_id", doc.get("id", "<unknown>")),
@@ -227,7 +227,7 @@ class AttachmentUploader:
                 log_event(
                     logger,
                     "warn",
-                    "PROCESSING",
+                    "ATTACHMENT",
                     "upload retry %d/%d for %s: %s"
                     % (attempt, self._retry.max_retries, name, exc),
                     doc_id=doc.get("_id", doc.get("id", "<unknown>")),

@@ -46,6 +46,9 @@ Key standards:
 - [`SCHEMA_MAPPING.md`](SCHEMA_MAPPING.md) – JSON-to-relational mapping definitions
 - [`WIZARD.md`](WIZARD.md) – Source wizard UI
 - [`SOURCE_TYPES.md`](SOURCE_TYPES.md) – Source type details (SG, App Services, Edge Server, CouchDB, BLIP)
+- [`FAILURE_OPTION_OUTPUT_RDBMS.md`](FAILURE_OPTION_OUTPUT_RDBMS.md) – Failure analysis & resolutions for SOURCE → PROCESS → OUTPUT (RDBMS)
+- [`FAILURE_OPTION_OUTPUT_HTTP.md`](FAILURE_OPTION_OUTPUT_HTTP.md) – Failure analysis & resolutions for SOURCE → PROCESS → OUTPUT (HTTP)
+- [`FAILURE_OPTION_OUTPUT_CLOUD.md`](FAILURE_OPTION_OUTPUT_CLOUD.md) – Failure analysis & resolutions for SOURCE → PROCESS → OUTPUT (Cloud Blob Storage)
 
 ---
 
@@ -650,6 +653,7 @@ A job document is the heart of the processing pipeline. It **copies** the releva
     "status": "stopped",
     "last_seq": "0",
     "last_error": "",
+    "halt_reason": null,
     "last_run_at": 0,
     "docs_processed": 0
   }
@@ -664,7 +668,7 @@ A job document is the heart of the processing pipeline. It **copies** the releva
 4. **Data is copied, not referenced** — the job is self-contained. If you change the `inputs_changes` or `outputs_rdbms` document later, existing jobs are NOT affected until you explicitly update them. This prevents "changing a source and accidentally breaking 5 jobs".
 5. **`schema_mapping` is embedded** — each job has its own mapping. The `mappings/` directory and `mappings` CBL collection are phased out as an edit surface; the mapping lives in the job.
 6. **`system` holds all processing config** — threads, concurrency, retry, checkpoint, attachments. This is the "how to run" config.
-7. **`state` is runtime state** — updated by the worker as it runs. The wizard/UI can read this to show job status.
+7. **`state` is runtime state** — updated by the worker as it runs. The wizard/UI can read this to show job status. `halt_reason` is set to `"auth_failure"`, `"eventing_halt"`, or `"ssl_failure"` when the pipeline stops on a non-recoverable error (PipelineManager skips auto-restart). `null` for normal running/stopped states.
 8. **Checkpoint is external** — stored in the `checkpoints` collection as `checkpoint::{job_uuid}`, not embedded in the job document. This separates config (rarely changes) from runtime state (changes every batch).
 
 ---
@@ -1403,8 +1407,13 @@ main()
 - Start/stop/restart individual jobs (via REST API or lifecycle events)
 - Enforce global `max_threads` config (max concurrent pipelines running)
 - Monitor job threads for crashes; restart with exponential backoff
+- **Skip auto-restart for non-recoverable failures:** `_monitor_threads()` checks `Pipeline.get_state()` flags and skips restart when:
+  - `_auth_failure = True` — source returned HTTP 401/403 (see [FAILURE_OPTION_OUTPUT_RDBMS.md §1.3](FAILURE_OPTION_OUTPUT_RDBMS.md))
+  - `_eventing_halt = True` — user's eventing handler raised `EventingHalt` (see [FAILURE_OPTION_OUTPUT_RDBMS.md §2.4](FAILURE_OPTION_OUTPUT_RDBMS.md))
+  - `_ssl_failure = True` — SSL/TLS handshake failed on RDBMS output (see [FAILURE_OPTION_OUTPUT_RDBMS.md §3.14](FAILURE_OPTION_OUTPUT_RDBMS.md))
+  - In all three cases the job stays in `error` state with checkpoint preserved until manually restarted.
 - Graceful shutdown: signal all pipelines, drain in-flight changes, save checkpoints
-- Expose job state (running/stopped/error) via REST `/api/jobs/{id}/state`
+- Expose job state (running/stopped/error/halted) via REST `/api/jobs/{id}/state`
 
 **`Pipeline` (per-job thread) responsibilities:**
 - Wraps a `threading.Thread` + isolated `asyncio.run()` event loop
@@ -1415,6 +1424,8 @@ main()
 - Accepts a job document + resolved input/output/mapping config
 - Catches exceptions → writes to DLQ → logs with job_id tag
 - Periodically writes checkpoint during the feed loop
+- **Non-fatal checkpoint saves:** checkpoint save failures are caught and logged; pipeline continues with in-memory `since` and retries on next batch (see [FAILURE_OPTION_OUTPUT_RDBMS.md §4.1](FAILURE_OPTION_OUTPUT_RDBMS.md))
+- **`get_state()` exposes halt flags:** `_auth_failure`, `_eventing_halt`, `_ssl_failure` — consumed by `PipelineManager._monitor_threads()` to skip auto-restart
 
 **`MiddlewareExecutor` (per-pipeline thread pool):**
 - `ThreadPoolExecutor(system.middleware_threads)` inside each Pipeline
@@ -1428,13 +1439,33 @@ Three automatic optimizations work together to maximize RDBMS write throughput:
 
 1. **Multi-row INSERT batching** — `group_insert_ops()` in `db/db_base.py` collapses consecutive same-table INSERTs into a single multi-row statement. For a document with 4 child array items, this reduces 4 round-trips to 1. All four engines have dialect-specific implementations.
 
-2. **Async commit (`sync_commit: false`, default)** — Each engine sets a session-level option to skip waiting for durable log flush after each commit (e.g., `SET synchronous_commit = OFF` on PostgreSQL). **2-5x throughput improvement.** Safe because the pipeline's checkpoint-based recovery re-processes any lost commits.
+2. **Async commit (`sync_commit: false`, default)** — Each engine sets a session-level option to skip waiting for durable log flush after each commit (e.g., `SET synchronous_commit = OFF` on PostgreSQL). **2-5x throughput improvement.** Safe because the pipeline's checkpoint-based recovery re-processes any lost commits. Use `sync_commit: true` for low-volume, high-value data where durability is more important than throughput (see [FAILURE_OPTION_OUTPUT_RDBMS.md §4.4](FAILURE_OPTION_OUTPUT_RDBMS.md)).
 
 3. **Prepared statement caching (`prepared_statements: true`, default)** — For PostgreSQL, asyncpg caches prepared statements per connection (`statement_cache_size=100`), eliminating repeated parse+plan overhead for the same SQL shapes. **10-30% improvement.**
 
 4. **Threaded schema mapping** — The CPU-bound `mapper.map_document()` call (JSONPath extraction + transforms) is offloaded to the Pipeline's `middleware_executor` ThreadPoolExecutor via `loop.run_in_executor()`. This releases the asyncio event loop so other docs can proceed with I/O (fetching, sending) while the mapper works. The executor is passed from `Pipeline` → `poll_changes()` → `BaseOutputForwarder.set_map_executor()`.
 
 Combined, these optimizations enable throughput in the 5,000–20,000 docs/sec range for RDBMS outputs. See [`RDBMS_IMPLEMENTATION.md`](RDBMS_IMPLEMENTATION.md#multi-row-insert-batching) for details.
+
+#### RDBMS Error Handling & Resilience
+
+Comprehensive failure analysis and fixes are documented in [`FAILURE_OPTION_OUTPUT_RDBMS.md`](FAILURE_OPTION_OUTPUT_RDBMS.md). Key design decisions:
+
+1. **Connect-with-retry at startup** — `poll_changes()` retries `output.connect()` with backoff up to 300s before entering the feed loop. The pipeline thread stays alive — no PipelineManager restart churn (§3.1).
+
+2. **Pool reconnect stampede prevention** — `_reconnect_pool()` uses an `asyncio.Event` (`_pool_ready`) so only one task reconnects while others wait. Generation check (`_pool_generation`) is evaluated before acquiring the lock (§3.2).
+
+3. **Selective pool reconnection** — A `_RECONNECT_SQLSTATES` set limits pool recreation to connection-lost errors (`08xxx`, `57P01/02`) and `42P01` (table_not_found). Pool exhaustion (`53300`) retries with the existing pool to avoid creating more connections (§3.3).
+
+4. **Extended backoff for infrastructure failures** — Disk full (`53100`) and out-of-memory (`53200`) use a 15-min max backoff instead of 5-min, matching real-world DBA recovery times (§3.8).
+
+5. **DLQ write failure safety net** — When `halt_on_failure: false` and a DLQ write fails, the batch processor upgrades to a halt. No doc is ever silently lost (§3.11, §4.3).
+
+6. **`duplicate_strategy: "skip"`** — Mapping config option that generates `INSERT … ON CONFLICT DO NOTHING` instead of bare `INSERT`. Recommended for parallel mode (`sequential: false`) to safely handle re-processing (§3.12).
+
+7. **Row-by-row fallback** — On non-transient multi-op transaction failure, `_execute_ops` falls back to row-by-row execution to isolate which specific rows failed. DLQ entries include per-row error details (§3.15).
+
+8. **Eventing/attachment error isolation** — Unexpected exceptions from `eventing_handler.process_change()` and `attachment_processor.process()` are caught and routed to DLQ instead of crashing the pipeline. Only `EventingHalt` stops the pipeline (§2.6, §2.7).
 
 #### Why threads, not processes?
 
@@ -1462,8 +1493,8 @@ The workload is I/O-bound (HTTP, DB writes). Python threads release the GIL duri
   - [ ] `stop_job(job_id)` — signal + stop a single job thread
   - [ ] `restart_job(job_id)` — stop + start
   - [ ] `restart_all()` — restart every running job
-  - [ ] `get_job_state(job_id)` → `{ status: "running|stopped|error|starting", uptime_seconds: N, error_count: N, last_error: "..." }`
-  - [ ] `_monitor_threads()` — background task; detect crashes; restart with backoff
+  - [ ] `get_job_state(job_id)` → `{ status: "running|stopped|error|halted|starting", uptime_seconds: N, error_count: N, last_error: "...", halt_reason: "auth_failure|eventing_halt|ssl_failure|null" }`
+  - [ ] `_monitor_threads()` — background task; detect crashes; restart with backoff; **skip restart** when `Pipeline.get_state()` reports `_auth_failure`, `_eventing_halt`, or `_ssl_failure` (log one-time event per halt reason)
 - [ ] Thread-safe job registry (use `threading.Lock()`)
 - [ ] Global `max_threads` enforcement (queue job starts if limit reached)
 - [ ] Respect job `enabled` flag — skip disabled jobs at startup
@@ -1504,6 +1535,14 @@ The workload is I/O-bound (HTTP, DB writes). Python threads release the GIL duri
   - [ ] `pipeline_crashes_total{job_id}`
   - [ ] `pipeline_restart_backoff_seconds{job_id}` — wait time before next restart
   - [ ] `jobs_running` — current count of running pipelines
+- [ ] **Error handling metrics** (from [FAILURE_OPTION_OUTPUT_RDBMS.md](FAILURE_OPTION_OUTPUT_RDBMS.md)):
+  - [ ] `docs_fetch_failed_total{job_id}` — doc fetch failures routed to DLQ (§2.1)
+  - [ ] `eventing_errors_total{job_id}` — unexpected eventing handler exceptions (§2.6)
+  - [ ] `attachment_errors_total{job_id}` — attachment processing failures (§2.7)
+  - [ ] `mapper_no_mapping_total{job_id}` — docs skipped due to no mapping loaded (§2.8)
+  - [ ] `validation_coercions_total{job_id}` — data coercions applied (§2.12, interim for v2.1)
+  - [ ] `dlq_write_failures_total{job_id}` — DLQ writes that failed (§3.11)
+  - [ ] `checkpoint_save_failures_total{job_id}` — checkpoint save failures (§4.1)
 - [ ] Dashboard: show per-job uptime, crash count, error logs
 
 **Graceful Shutdown:**
@@ -1540,9 +1579,10 @@ The workload is I/O-bound (HTTP, DB writes). Python threads release the GIL duri
   - [ ] Auto-generate Pydantic model from RDBMS table DDL (`tables[].sql`)
   - [ ] Coerce types: str→int, int overflow→clamp, string truncate, epoch→datetime
   - [ ] `strict_fields` → reject to DLQ if invalid; `coerce_fields` → auto-fix and log
-  - [ ] Write coercion entries to `data_quality` collection
+  - [ ] Write coercion entries to `data_quality` collection (replaces interim `validation_coercions_total` metric — see [FAILURE_OPTION_OUTPUT_RDBMS.md §2.12](FAILURE_OPTION_OUTPUT_RDBMS.md))
   - [ ] Add `CBLStore.add_data_quality_entry()` and `list_data_quality()`
   - [ ] Add TTL purge to CBL maintenance scheduler
+  - **Note:** Interim improvements already landed: coercion logs promoted from DEBUG to INFO, `validation_coercions_total` metric added, strict validation now routes to DLQ (§2.13)
 - [ ] **`timestamp_normalize` middleware:**
   - [ ] Parse any timestamp format (ISO, epoch sec/ms, custom strftime)
   - [ ] Convert to target timezone

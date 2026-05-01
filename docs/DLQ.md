@@ -7,6 +7,7 @@ The dead letter queue is where documents go to survive. When the output target r
 - [`JOBS.md`](JOBS.md) — Job ID concept, per-engine/per-job metrics
 - [`CBL_DATABASE.md`](CBL_DATABASE.md) — DLQ storage schema in Couchbase Lite
 - [`CONFIGURATION.md`](CONFIGURATION.md) — Full config reference
+- [`FAILURE_OPTION_OUTPUT_RDBMS.md`](FAILURE_OPTION_OUTPUT_RDBMS.md) — Failure analysis & resolutions for SOURCE → PROCESS → OUTPUT (RDBMS)
 
 ---
 
@@ -16,19 +17,23 @@ The DLQ is active in two scenarios:
 
 1. **`halt_on_failure: false`** — the worker skips failed docs instead of stopping; all failures go to the DLQ
 2. **`data_error_action: "dlq"`** (default) — permanent data errors (type mismatches, constraint violations, 4xx) are routed to the DLQ even when `halt_on_failure: true`. These errors will never self-heal on retry, so the pipeline advances past them.
+3. **Process stage errors** — doc fetch failures (non-404/409), unexpected eventing handler exceptions, and attachment processing failures are routed to the DLQ when enabled. These are caught and classified instead of crashing the pipeline (see [FAILURE_OPTION_OUTPUT_RDBMS.md](FAILURE_OPTION_OUTPUT_RDBMS.md) §2.1, §2.6, §2.7).
 
 A **storage backend** must also exist — either CBL is available (automatic) or `dead_letter_path` is set (file fallback).
 
-### Data errors vs. infrastructure errors
+### Error classification: transient vs. permanent
 
-The system distinguishes between two categories of failure:
+The system classifies every output error as either **transient** (retry with backoff) or **permanent** (straight to DLQ). This classification drives retry behavior, `halt_on_failure` applicability, and DLQ routing.
 
-| Category | Examples | `halt_on_failure` applies? | DLQ behavior |
-|---|---|---|---|
-| **Data error** | int32 overflow, constraint violation, 4xx client error | ❌ No — never halts | Controlled by `data_error_action`: `"dlq"` (store) or `"skip"` (drop) |
-| **Infrastructure error** | 5xx server error, connection refused, timeout | ✅ Yes | `halt_on_failure: true` → stop batch; `false` → DLQ |
+| Category | RDBMS examples | HTTP examples | Retried? | `halt_on_failure` applies? | DLQ behavior |
+|---|---|---|---|---|---|
+| **Transient** | Connection refused, timeout, deadlock, lock contention, resource exhaustion, table not found, server shutdown | 404, 408, 429, 500, 502, 503, 504, 507, connection error | ✅ Yes — exponential backoff | ✅ Yes — if retries exhaust | `halt_on_failure: true` → stop batch; `false` → DLQ |
+| **Permanent (data)** | Constraint violation, data type mismatch, null violation | 400, 409, 410, 413, 422 | ❌ No | ❌ No — never halts | Controlled by `data_error_action`: `"dlq"` (store) or `"skip"` (drop) |
+| **Permanent (config)** | Auth failure, permission denied, invalid database, read-only | 401, 403, 405, 415, 501 | ❌ No | ❌ No — never halts | Controlled by `data_error_action` |
 
-This separation exists because data errors are "you messed up" (the data itself is wrong) while infrastructure errors are "I messed up" (the server is down). Retrying a data error forever would create an infinite loop — the checkpoint never advances and the same bad document blocks the entire pipeline.
+**Key design principle:** Transient errors are "try again later" — the output may recover (server restart, table recreated, rate limit lifted). Permanent errors are "this data/config will never work" — retrying wastes time and blocks the pipeline.
+
+**Table not found is transient.** A `DROP TABLE` followed by `CREATE TABLE` is a valid operational pattern (schema migrations, maintenance). The pipeline retries with backoff, and once the table is recreated, writes succeed without manual intervention. This applies across all RDBMS engines: PostgreSQL (`42P01`), MySQL (`1146`), MSSQL (`208`), Oracle (`ORA-00942`).
 
 ### The trigger path in code
 
@@ -51,18 +56,38 @@ document → output.send() → classify error
 
 ### Specific triggers
 
-| Scenario | What the output returns | `reason` field | DLQ entry created? |
+| Scenario | Error class | Transient? | DLQ entry created? |
 |---|---|---|---|
-| DB data type mismatch (e.g., int32 overflow) | `{ok: false, error_class: "data_type"}` | `data_error:data_type` | ✅ If `data_error_action: "dlq"` |
-| DB constraint violation | `{ok: false, error_class: "constraint"}` | `data_error:constraint` | ✅ If `data_error_action: "dlq"` |
-| HTTP 4xx (client error) | `{ok: false, status: 400}` | `client_error:400` | ✅ If `data_error_action: "dlq"` |
-| HTTP 5xx after all retries | `{ok: false, status: 500}` | `server_error:500` | ✅ If `halt_on_failure: false` |
-| HTTP 3xx (redirect, `follow_redirects=false`) | `{ok: false, status: 301}` | `redirect:301` | ✅ If `halt_on_failure: false` |
-| Connection refused / timeout after retries | `{ok: false, status: 0}` | `connection_failure` | ✅ If `halt_on_failure: false` |
-| Shutdown with `dlq_inflight_on_shutdown: true` | `{status: 0, error: "shutdown_inflight"}` | `shutdown_inflight` | ✅ Yes |
-| Successful delivery (2xx) | `{ok: true, status: 200}` | — | ❌ No |
-| Infrastructure failure + `halt_on_failure: true` | Exception raised, batch stops | — | ❌ No (checkpoint held instead) |
-| Data error + `data_error_action: "skip"` | `{ok: false}` — logged and skipped | — | ❌ No (dropped) |
+| DB constraint violation (unique, FK, null, check) | `constraint_violation` | ❌ Permanent | ✅ If `data_error_action: "dlq"` |
+| DB data type mismatch (overflow, bad cast) | `data_type` | ❌ Permanent | ✅ If `data_error_action: "dlq"` |
+| DB syntax / schema error (wrong column name) | `syntax_or_schema` | ❌ Permanent | ✅ If `data_error_action: "dlq"` |
+| DB auth / permission denied | `auth_failure` | ❌ Permanent | ✅ If `data_error_action: "dlq"` |
+| DB table not found (table dropped) | `table_not_found` | ✅ Transient | Only after retries exhaust + `halt_on_failure: false` |
+| DB connection refused / timeout | `connection` | ✅ Transient | Only after retries exhaust + `halt_on_failure: false` |
+| DB deadlock / lock contention | `deadlock`, `lock_contention` | ✅ Transient | Only after retries exhaust + `halt_on_failure: false` |
+| DB resource exhaustion (memory, disk, connections) | `resource_exhaustion` | ✅ Transient | Only after retries exhaust + `halt_on_failure: false` |
+| DB server shutdown / restart | `server_shutdown` | ✅ Transient | Only after retries exhaust + `halt_on_failure: false` |
+| HTTP 400/422 (bad request) | `bad_request` | ❌ Permanent | ✅ If `data_error_action: "dlq"` |
+| HTTP 401/403 (auth failure) | `auth_failure` | ❌ Permanent | ✅ If `data_error_action: "dlq"` |
+| HTTP 409 (conflict) | `conflict` | ❌ Permanent | ✅ If `data_error_action: "dlq"` |
+| HTTP 410 (gone) | `gone` | ❌ Permanent | ✅ If `data_error_action: "dlq"` |
+| HTTP 404 (not found) | `not_found` | ✅ Transient | Only after retries exhaust + `halt_on_failure: false` |
+| HTTP 408 (request timeout) | `client_timeout` | ✅ Transient | Only after retries exhaust + `halt_on_failure: false` |
+| HTTP 429 (rate limited) | `rate_limited` | ✅ Transient | Only after retries exhaust + `halt_on_failure: false` |
+| HTTP 500/502/503/504/507 (server error) | `service_unavailable`, `bad_gateway`, etc. | ✅ Transient | Only after retries exhaust + `halt_on_failure: false` |
+| HTTP 501/505 (not implemented) | `server_permanent:5xx` | ❌ Permanent | ✅ If `data_error_action: "dlq"` |
+| HTTP 3xx (redirect, `follow_redirects=false`) | `redirect` | ❌ | ✅ If `halt_on_failure: false` |
+| Connection refused / DNS failure | `connection_failure` | ✅ Transient | Only after retries exhaust + `halt_on_failure: false` |
+| Shutdown with `dlq_inflight_on_shutdown: true` | `shutdown_inflight` | — | ✅ Yes |
+| Doc fetch failed (non-404/409, retries exhausted) | `fetch_failed` | ✅ Transient (retried) | ✅ If `data_error_action: "dlq"` |
+| Eventing handler unexpected exception | `eventing` | ❌ Permanent | ✅ If `data_error_action: "dlq"` |
+| Attachment processing failure | `attachment` | ❌ Permanent | ✅ If `data_error_action: "dlq"` |
+| Validation strict mode failure | `validation` | ❌ Permanent | ✅ If `data_error_action: "dlq"` |
+| Multi-row INSERT partial failure (row-by-row fallback) | `partial` | ❌ Permanent | ✅ If `data_error_action: "dlq"` |
+| No schema mapping loaded | `no_mapping` | ❌ Config gap | ❌ Skipped (not a data error) |
+| Successful delivery (2xx) | `success` | — | ❌ No |
+| Transient failure + `halt_on_failure: true` | Exception raised, batch stops | — | ❌ No (checkpoint held instead) |
+| Permanent error + `data_error_action: "skip"` | Logged and dropped | — | ❌ No (dropped) |
 
 ---
 
@@ -101,17 +126,54 @@ Each failed document is written individually to the DLQ via `DeadLetterQueue.wri
 
 ### Reason codes
 
-The `reason` field provides a machine-readable classification for why a document ended up in the DLQ:
+The `reason` / `error_class` field provides a machine-readable classification for why a document ended up in the DLQ:
 
-| Reason | Meaning | Likely fix |
+#### RDBMS error classes
+
+| Error class | Transient? | Meaning | Likely fix |
+|---|---|---|---|
+| `constraint_violation` | ❌ | Unique, FK, check, or null constraint violated | Fix the source data or schema mapping |
+| `data_type` | ❌ | Value doesn't fit the target column type (overflow, bad cast) | Fix the schema mapping or add a transform |
+| `syntax_or_schema` | ❌ | Invalid column name, bad SQL syntax | Fix the schema mapping |
+| `table_not_found` | ✅ | Table/view does not exist (may be recreated) | Recreate the table; retries will succeed |
+| `auth_failure` | ❌ | Invalid credentials or insufficient privileges | Fix DB user permissions |
+| `invalid_database` | ❌ | Database or schema does not exist | Fix connection config |
+| `read_only` | ❌ | Server is in read-only mode (MySQL) | Wait for maintenance to complete |
+| `connection` | ✅ | TCP connection refused, reset, or lost | Check network/firewall; will auto-retry |
+| `timeout` | ✅ | Query or connection timed out | May resolve on its own |
+| `deadlock` | ✅ | Deadlock detected, transaction rolled back | Automatic retry succeeds |
+| `lock_contention` | ✅ | Lock wait timeout or resource busy | Automatic retry succeeds |
+| `resource_exhaustion` | ✅ | Out of memory, disk full, too many connections | Free resources; will auto-retry |
+| `server_shutdown` | ✅ | DB server shutting down or restarting | Wait for restart; will auto-retry |
+| `serialization` | ✅ | Snapshot too old or serialization failure (Oracle) | Automatic retry succeeds |
+| `fetch_failed` | ✅ | Doc fetch returned non-404/409 error after retries | Check source availability; replay from DLQ |
+| `eventing` | ❌ | Unexpected exception in user's eventing handler | Fix the JS handler code |
+| `attachment` | ❌ | Attachment processing (detect/fetch/upload) failed | Check attachment config and cloud credentials |
+| `validation` | ❌ | Strict validation failed — field cannot be coerced | Fix the source data or relax strict mode |
+| `partial` | ❌ | Multi-row INSERT: some rows failed (row-by-row fallback) | Inspect `failed_ops` in DLQ entry for per-row errors |
+
+#### HTTP error classes
+
+| Error class | Transient? | Meaning | Likely fix |
+|---|---|---|---|
+| `bad_request` | ❌ | HTTP 400/422 — malformed or invalid payload | Fix the document or schema mapping |
+| `auth_failure` | ❌ | HTTP 401/403/407 — authentication failure | Fix output auth config |
+| `conflict` | ❌ | HTTP 409 — data conflict at the target | Resolve the conflict in the target system |
+| `gone` | ❌ | HTTP 410 — resource permanently removed | Update target URL |
+| `method_or_media` | ❌ | HTTP 405/415 — wrong method or content type | Fix output config |
+| `payload_too_large` | ❌ | HTTP 413 — document too large for endpoint | Reduce doc size or increase server limit |
+| `not_found` | ✅ | HTTP 404 — endpoint may come back | Will auto-retry; check target URL |
+| `client_timeout` | ✅ | HTTP 408 — server timed out waiting | Automatic retry |
+| `rate_limited` | ✅ | HTTP 429 — too many requests | Automatic retry with backoff |
+| `service_unavailable` | ✅ | HTTP 503 — server overloaded or maintenance | Wait for recovery; will auto-retry |
+| `bad_gateway` | ✅ | HTTP 502 — upstream server error | Will auto-retry |
+| `gateway_timeout` | ✅ | HTTP 504 — upstream timeout | Will auto-retry |
+
+#### Other error classes
+
+| Error class | Meaning | Likely fix |
 |---|---|---|
-| `data_error:data_type` | Value doesn't fit the target column type (e.g., int64 → int32) | Fix the schema mapping or the source data |
-| `data_error:constraint` | Unique/foreign key constraint violation | Resolve the conflict in the target DB |
-| `data_error:permission` | DB permission denied | Grant the necessary privileges |
-| `client_error:4xx` | HTTP output target returned a 4xx status | Fix the request payload or endpoint config |
-| `server_error:5xx` | HTTP output target returned a 5xx after all retries | Wait for the server to recover, then replay |
-| `redirect:3xx` | Unexpected redirect (and `follow_redirects=false`) | Update `target_url` or enable redirects |
-| `connection_failure` | TCP connection refused or timed out after all retries | Check network/firewall, then replay |
+| `connection_failure` | TCP connection refused or DNS failure after all retries | Check network/firewall, then replay |
 | `shutdown_inflight` | Worker was shut down while this doc was in-flight | Replay on next startup (automatic) |
 | `unknown` | Unclassified error | Inspect the `error` field for details |
 
@@ -165,14 +227,33 @@ batch processes 1000 docs → 12 fail → 12 individual dlq.write() calls
                                     → 1 dlq.flush_insert_meta(job_id)  ← single CBL write
 ```
 
-The `dlq:meta` document in CBL stores:
+The `dlq:meta` document in CBL stores both **global** timestamps (latest across all jobs) and **per-job** timestamps so that multi-pipeline deployments preserve each job's DLQ history independently:
 
 | Field | Type | Description |
 |---|---|---|
-| `last_inserted_at` | `int` (epoch) | When the most recent batch wrote entries to the DLQ |
+| `last_inserted_at` | `int` (epoch) | When the most recent batch wrote entries to the DLQ (global) |
 | `last_inserted_job` | `str` | The `checkpoint.client_id` (job identity) of that batch |
-| `last_drained_at` | `int` (epoch) | When the most recent replay successfully drained entries |
+| `last_drained_at` | `int` (epoch) | When the most recent replay successfully drained entries (global) |
 | `last_drained_job` | `str` | The job identity that performed the drain |
+| `jobs` | `dict` | Per-job DLQ history (see below) |
+
+The `jobs` field is a dictionary keyed by job ID, where each entry tracks that job's own insert/drain timestamps:
+
+```json
+{
+  "type": "dlq_meta",
+  "last_inserted_at": 1745678900,
+  "last_inserted_job": "job::aaa",
+  "last_drained_at": 1745679200,
+  "last_drained_job": "job::bbb",
+  "jobs": {
+    "job::aaa": { "last_inserted_at": 1745678900, "last_drained_at": 1745679100 },
+    "job::bbb": { "last_inserted_at": 1745670000, "last_drained_at": 1745679200 }
+  }
+}
+```
+
+The global fields are backward-compatible; the dashboard uses them for the "last incident" display. The per-job entries allow the UI (or API consumers) to show per-pipeline DLQ history. The document is fetched via a simple `GET("dlq:meta")` — no N1QL query needed.
 
 ---
 
@@ -566,24 +647,31 @@ rate(changes_worker_retry_exhausted_total[5m]) > 0
 
 ### DLQ metadata via REST
 
-The `/api/dlq/meta` endpoint returns the batch-level timestamps:
+The `/api/dlq/meta` endpoint returns the batch-level timestamps with per-job history:
 
 ```json
 {
     "last_inserted_at": 1713456789,
-    "last_inserted_job": "changes_worker",
+    "last_inserted_job": "job::aaa",
     "last_drained_at": 1713460000,
-    "last_drained_job": "changes_worker"
+    "last_drained_job": "job::bbb",
+    "jobs": {
+        "job::aaa": { "last_inserted_at": 1713456789, "last_drained_at": 1713458000 },
+        "job::bbb": { "last_inserted_at": 1713450000, "last_drained_at": 1713460000 }
+    }
 }
 ```
 
-These are unix epoch integers. The admin UI dashboard converts them to human-readable format with relative time (e.g., "4/18/2026, 2:30:15 PM (3h ago)").
+These are unix epoch integers. The admin UI dashboard converts them to human-readable format with relative time (e.g., "4/18/2026, 2:30:15 PM (3h ago)"). The dashboard polls this endpoint every 30 seconds.
 
 ### Dashboard visibility
 
 The DLQ node in the architecture diagram shows:
-- **Hover tooltip**: dead letter count, last insert time, last drain time, link to `/api/dlq`
-- **Click modal**: dead letters, last inserted/drained timestamps, job IDs, output errors/success/retries, uptime, plus two charts (output outcomes pie + dead letters over time)
+- **Node label**: pending count (gauge) + cumulative total — e.g., "3 pending · 42 total"
+- **Hover tooltip**: pending count, total count, DB retries, retry exhausted, last incident (relative time), last drain time, link to `/api/dlq`
+- **Click modal**: pending (current) vs total (cumulative), last incident, last inserted/drained timestamps, job IDs, DB retries / retry exhausted / transient errors / permanent errors, output errors/success, uptime, plus two charts:
+  - **Pie chart**: Output outcomes (success, errors, dead letters, retries)
+  - **Line chart**: DLQ rate + DB retry rate over time
 
 ---
 
@@ -627,7 +715,9 @@ The DLQ node in the architecture diagram shows:
             "max_retries": 3,              // retries before giving up on a doc
             "backoff_base_seconds": 1,     // exponential backoff base
             "backoff_max_seconds": 30,     // backoff ceiling
-            "retry_on_status": [500, 502, 503, 504]  // which HTTP statuses trigger retry
+            "retry_on_status": [500, 502, 503, 504, 507]  // which HTTP statuses trigger explicit retry
+                                                            // Note: transient 4xx (404, 408, 429, etc.)
+                                                            // are auto-retried by the classifier regardless
         },
 
         "health_check": {
@@ -718,14 +808,19 @@ The DLQ Explorer is a dedicated admin UI page for inspecting, diagnosing, and ma
 
 ### Reason badge colors
 
-| Reason prefix | Badge color | Meaning |
+| Error class pattern | Badge color | Meaning |
 |---|---|---|
-| `data_error:*` | 🟡 Warning/yellow | Data problem — fix the source or mapping |
-| `client_error:*` | 🟠 Orange | Client sent bad request — fix config |
-| `server_error:*` | 🔴 Error/red | Server-side failure — may self-heal |
-| `connection_failure` | 🔴 Error/red | Network issue — check connectivity |
-| `shutdown_inflight` | 🔵 Info/blue | Expected during shutdown — auto-replays |
+| `constraint_violation`, `data_type` | 🟡 Warning/yellow | Data problem — fix the source or mapping |
+| `bad_request`, `conflict`, `gone`, `payload_too_large` | 🟡 Warning/yellow | Request/data problem — fix doc or config |
+| `auth_failure`, `invalid_database`, `permission_denied` | 🟠 Orange | Auth/config problem — fix credentials or permissions |
+| `table_not_found`, `not_found` | 🟠 Orange | Missing resource — may come back (was retried first) |
+| `rate_limited` | 🟠 Orange | Rate limited — retried with backoff before DLQ |
+| `connection`, `service_unavailable`, `bad_gateway` | 🔴 Error/red | Infrastructure failure — may self-heal |
+| `resource_exhaustion`, `deadlock`, `lock_contention` | 🔴 Error/red | Resource/concurrency issue — retried first |
+| `server_shutdown`, `timeout`, `gateway_timeout` | 🔴 Error/red | Server issue — retried before DLQ |
+| `shutdown_inflight` | 🔵 Info/blue | Expected during shutdown — auto-replays on restart |
 | `redirect:*` | ⚫ Neutral/gray | Redirect issue — update URL |
+| `syntax_or_schema`, `method_or_media` | ⚫ Neutral/gray | Config/mapping problem — fix mapping definition |
 | `unknown` | ⚫ Neutral/gray | Inspect error field for details |
 
 ---
@@ -737,6 +832,8 @@ The DLQ Explorer is a dedicated admin UI page for inspecting, diagnosing, and ma
 **With CBL and Docker volumes:** Entries persist in the CBL database on a Docker named volume. However, entries will be **automatically purged** after `retention_seconds` (default 24 hours). If you need entries to live longer, increase the retention or set it to 0.
 
 **With file fallback and no volume mount:** Yes. If the container is destroyed, the JSONL file is lost. Additionally, if the file write itself fails (disk full, permissions), the error is now raised and counted via `dlq_write_failures_total`.
+
+**DLQ write failure safety net:** When `halt_on_failure: false` and a DLQ write itself fails (CBL unavailable), the batch processor now upgrades to a halt — the checkpoint does not advance and the doc will be re-processed on the next attempt. No document is ever silently lost regardless of `halt_on_failure` setting. See [FAILURE_OPTION_OUTPUT_RDBMS.md](FAILURE_OPTION_OUTPUT_RDBMS.md) §3.11.
 
 ### Q: Why doesn't the DLQ retry automatically during runtime?
 

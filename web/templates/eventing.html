@@ -9,15 +9,20 @@
     <link href="/static/css/themes.css" rel="stylesheet" type="text/css" />
     <link href="/static/css/sidebar.css" rel="stylesheet" type="text/css" />
     <script src="/static/js/tailwind.js"></script>
-    <!-- CodeMirror 5 — light theme + JS mode + code folding -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/codemirror.min.css" />
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/addon/fold/foldgutter.min.css" />
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/codemirror.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/mode/javascript/javascript.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/addon/fold/foldcode.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/addon/fold/foldgutter.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/addon/fold/brace-fold.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/addon/edit/matchbrackets.min.js"></script>
+    <!-- CodeMirror 5 (local) — JS mode + code folding -->
+    <link rel="stylesheet" href="/static/css/codemirror/codemirror.min.css" />
+    <link rel="stylesheet" href="/static/css/codemirror/foldgutter.min.css" />
+    <link rel="stylesheet" href="/static/css/codemirror/lint.min.css" />
+    <script src="/static/js/codemirror/codemirror.min.js"></script>
+    <script src="/static/js/codemirror/javascript.min.js"></script>
+    <script src="/static/js/codemirror/foldcode.min.js"></script>
+    <script src="/static/js/codemirror/foldgutter.min.js"></script>
+    <script src="/static/js/codemirror/brace-fold.min.js"></script>
+    <script src="/static/js/codemirror/matchbrackets.min.js"></script>
+    <!-- JSHint + CodeMirror lint addon (local) -->
+    <script src="/static/js/codemirror/jshint.min.js"></script>
+    <script src="/static/js/codemirror/lint.min.js"></script>
+    <script src="/static/js/codemirror/javascript-lint.min.js"></script>
     <script>
       (function () {
         var t = localStorage.getItem("cw_theme") || "dark";
@@ -59,7 +64,7 @@
         background: #fff;
         border-top: 2px solid #7b68ae;
         border-radius: 6px 6px 0 0;
-        cursor: default;
+        cursor: pointer;
         font-family: system-ui, sans-serif;
       }
       .editor-tab-inactive {
@@ -67,21 +72,6 @@
         background: #f0f0f0;
         border-top: 2px solid transparent;
         cursor: pointer;
-      }
-
-      .attachment-thumb {
-        width: 120px;
-        height: 90px;
-        background: #e8e8e8;
-        border: 1px dashed #bbb;
-        border-radius: 0.5rem;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 0.75rem;
-        color: #888;
-        text-align: center;
-        line-height: 1.3;
       }
     </style>
   </head>
@@ -105,90 +95,161 @@
           <div class="card-body p-4">
             <div class="flex items-center justify-between">
               <div class="flex items-center gap-4">
-                <a href="#" class="text-sm text-primary hover:underline flex items-center gap-1">
-                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" /></svg>
-                  back to Eventing
-                </a>
                 <h1 class="text-xl font-bold">Function Editor</h1>
-                <span class="badge badge-outline badge-sm">bucket_op_sb_beer_sample</span>
+                <select id="jobSelect" class="select select-bordered select-sm w-64">
+                  <option value="">— Select a Job —</option>
+                </select>
+                <span id="enabledBadge" class="badge badge-ghost badge-sm hidden">disabled</span>
               </div>
               <div class="flex items-center gap-2">
-                <button class="btn btn-ghost btn-sm btn-circle">
-                  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
-                </button>
+                <label class="label cursor-pointer gap-2">
+                  <span class="label-text text-sm">Enabled</span>
+                  <input type="checkbox" id="eventingEnabled" class="toggle toggle-sm toggle-primary" />
+                </label>
               </div>
             </div>
           </div>
         </div>
 
         <!-- Code Editor Area -->
-        <div class="card bg-base-100 shadow rounded-2xl overflow-hidden">
+        <div id="editorPanel" class="card bg-base-100 shadow rounded-2xl overflow-hidden">
           <!-- Tab bar -->
           <div class="editor-tab-bar px-2 pt-2">
-            <div class="editor-tab">
-              <span style="font-weight:600">JS</span>
-              <span style="opacity:0.6">bucket_op_sb_beer_sample.js</span>
-              <span style="margin-left:6px;opacity:0.35;cursor:pointer">✕</span>
+            <div class="editor-tab" id="tabJs" onclick="switchTab('js')">
+              <span style="font-weight:600">JavaScript</span>
             </div>
-            <div class="editor-tab editor-tab-inactive">Settings</div>
+            <div class="editor-tab editor-tab-inactive" id="tabSettings" onclick="switchTab('settings')">Settings</div>
           </div>
           <!-- CodeMirror target -->
-          <textarea id="jsEditor">function OnUpdate(doc, meta, xattrs) {
-    log("Doc created/updated", meta.id);
-
-    if(doc["cs300"] > 0){
-
-        log("moving to cake32", meta.id);
-        doc["moved"] = true;
-        var docId = meta.id +":" + uuid()
-        cake32[docId] = doc;
-
-    }else{
-        log("no cs300 to small", meta.id);
-    }
-
+          <div id="jsPane">
+            <textarea id="jsEditor">function OnUpdate(doc, meta) {
+    log("Doc created/updated", meta._id);
+    return doc;
 }
 
-
-function OnDelete(meta, options) {
-    log("Doc deleted/expired", meta.id);
-}
-
-function uuid() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'
-        .replace(/[xy]/g, function (c) {
-            const r = Math.random() * 16 | 0,
-                v = c == 'x' ? r : (r & 0x3 | 0x8);
-            return v.toString(16);
-        });
+function OnDelete(meta) {
+    log("Doc deleted/removed", meta._id);
 }</textarea>
+          </div>
+
+          <!-- Settings pane (hidden by default) -->
+          <div id="settingsPane" class="p-6 space-y-4" style="display:none; background:#fff;">
+            <div class="grid grid-cols-2 gap-4">
+              <div class="form-control">
+                <label class="label"><span class="label-text text-gray-700">Timeout (ms)</span></label>
+                <input type="number" id="settTimeout" class="input input-bordered input-sm" value="5000" min="100" max="60000" />
+              </div>
+              <div class="form-control">
+                <label class="label"><span class="label-text text-gray-700">Description</span></label>
+                <input type="text" id="settDescription" class="input input-bordered input-sm" placeholder="What this handler does" />
+              </div>
+              <div class="form-control">
+                <label class="label"><span class="label-text text-gray-700">On Error</span></label>
+                <select id="settOnError" class="select select-bordered select-sm">
+                  <option value="reject" selected>reject — drop the document</option>
+                  <option value="pass">pass — forward original doc</option>
+                  <option value="halt">halt — stop the job</option>
+                </select>
+              </div>
+              <div class="form-control">
+                <label class="label"><span class="label-text text-gray-700">On Timeout</span></label>
+                <select id="settOnTimeout" class="select select-bordered select-sm">
+                  <option value="reject" selected>reject — drop the document</option>
+                  <option value="pass">pass — forward original doc</option>
+                  <option value="halt">halt — stop the job</option>
+                </select>
+              </div>
+            </div>
+            <!-- Constants -->
+            <div>
+              <label class="label"><span class="label-text text-gray-700 font-semibold">Constants</span></label>
+              <p class="text-xs text-gray-500 mb-2">Key-value pairs injected as global JS variables. Values must be valid JSON (strings in quotes, numbers, booleans, null).</p>
+              <div id="constantsList" class="space-y-2"></div>
+              <button class="btn btn-xs btn-ghost mt-2" onclick="addConstant()">+ Add Constant</button>
+            </div>
+          </div>
         </div>
+
+        <!-- Status toast -->
+        <div id="statusToast" class="toast toast-end" style="display:none;">
+          <div class="alert alert-success"><span id="statusMsg"></span></div>
+        </div>
+
+        <!-- Restart required toast container -->
+        <div id="toastContainer" class="toast toast-end" style="z-index:1000;"></div>
 
         <!-- Bottom Action Bar -->
         <div class="card bg-base-100 shadow rounded-2xl">
           <div class="card-body p-3">
             <div class="flex items-center justify-between">
               <div class="flex items-center gap-2">
-                <button class="btn btn-sm btn-info">Debug</button>
+                <button class="btn btn-sm btn-info" onclick="debugHandler()">Debug</button>
               </div>
               <div class="flex items-center gap-3">
-                <button class="btn btn-ghost btn-sm btn-circle">
-                  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                </button>
-                <button class="btn btn-ghost btn-sm">Cancel</button>
-                <button class="btn btn-sm btn-primary" style="background: #6366f1; border-color: #6366f1;">Save and Return</button>
-                <button class="btn btn-sm btn-primary" style="background: #6366f1; border-color: #6366f1;">Save</button>
+                <button class="btn btn-ghost btn-sm" onclick="loadEventing()">Reload</button>
+                <button class="btn btn-sm btn-primary" style="background: #6366f1; border-color: #6366f1;" onclick="saveEventing()">Save</button>
               </div>
             </div>
           </div>
         </div>
 
+        <!-- Debug Panel (hidden by default) -->
+        <div id="debugPanel" class="card bg-base-100 shadow rounded-2xl" style="display:none;">
+          <div class="card-body p-4 space-y-3">
+            <h3 class="font-bold text-sm">Debug — Test Handler</h3>
+            <div class="grid grid-cols-2 gap-4">
+              <div class="form-control">
+                <label class="label"><span class="label-text text-sm">Sample Document (JSON)</span></label>
+                <textarea id="debugDoc" class="textarea textarea-bordered font-mono text-xs" rows="6">{"_id": "hotel::123", "_rev": "1-abc", "type": "hotel", "name": "Test Hotel", "rating": 4.5}</textarea>
+              </div>
+              <div class="form-control">
+                <label class="label"><span class="label-text text-sm">Result</span></label>
+                <pre id="debugResult" class="bg-gray-100 p-3 rounded text-xs font-mono overflow-auto" style="min-height:120px; color:#333;">Click "Run Test" to execute</pre>
+              </div>
+            </div>
+            <div class="flex gap-2">
+              <button class="btn btn-sm btn-info" onclick="runDebug()">Run Test</button>
+              <label class="label cursor-pointer gap-2">
+                <input type="checkbox" id="debugIsDelete" class="checkbox checkbox-xs" />
+                <span class="label-text text-sm">Simulate Delete</span>
+              </label>
+            </div>
+          </div>
+        </div>
 
       </main>
     </div>
 
     <script src="/static/js/sidebar.js"></script>
     <script>
+      // Custom lint: tells JSHint that OnUpdate/OnDelete are exported entry points
+      function eventingLint(text) {
+        if (!window.JSHINT) return [];
+        var prefix = "/* exported OnUpdate, OnDelete */\n";
+        JSHINT(prefix + text, {
+          esversion: 6,
+          undef: true,
+          unused: "vars",
+          latedef: "nofunc"
+        }, { log: false });
+        var data = JSHINT.data();
+        var errs = (data && data.errors) || [];
+        var result = [];
+        for (var i = 0; i < errs.length; i++) {
+          var e = errs[i];
+          if (!e) continue;
+          var line = e.line - 2;  // offset for the 1-line prefix (JSHint is 1-based)
+          if (line < 0) continue;
+          result.push({
+            from: CodeMirror.Pos(line, Math.max(0, (e.character || 1) - 1)),
+            to:   CodeMirror.Pos(line, (e.character || 1)),
+            message: e.reason,
+            severity: e.code && e.code.charAt(0) === 'E' ? 'error' : 'warning'
+          });
+        }
+        return result;
+      }
+
       var editor = CodeMirror.fromTextArea(document.getElementById('jsEditor'), {
         mode: 'javascript',
         lineNumbers: true,
@@ -196,9 +257,281 @@ function uuid() {
         tabSize: 4,
         indentUnit: 4,
         foldGutter: true,
-        gutters: ['CodeMirror-linenumbers', 'CodeMirror-foldgutter'],
+        lint: { getAnnotations: eventingLint, async: false },
+        gutters: ['CodeMirror-lint-markers', 'CodeMirror-linenumbers', 'CodeMirror-foldgutter'],
         readOnly: false
       });
+
+      var currentJobId = null;
+
+      // ── Tab switching ──
+      function switchTab(tab) {
+        if (tab === 'js') {
+          document.getElementById('jsPane').style.display = '';
+          document.getElementById('settingsPane').style.display = 'none';
+          document.getElementById('tabJs').className = 'editor-tab';
+          document.getElementById('tabSettings').className = 'editor-tab editor-tab-inactive';
+          editor.refresh();
+        } else {
+          document.getElementById('jsPane').style.display = 'none';
+          document.getElementById('settingsPane').style.display = '';
+          document.getElementById('tabJs').className = 'editor-tab editor-tab-inactive';
+          document.getElementById('tabSettings').className = 'editor-tab';
+        }
+      }
+
+      // ── Constants ──
+      function addConstant(key, value) {
+        var div = document.createElement('div');
+        div.className = 'flex gap-2 items-center';
+        div.innerHTML =
+          '<input type="text" class="input input-bordered input-xs w-32 const-key" placeholder="key" value="' + (key || '') + '" />' +
+          '<input type="text" class="input input-bordered input-xs flex-1 const-val" placeholder="value (JSON)" value=\'' + (value !== undefined ? JSON.stringify(value) : '') + '\' />' +
+          '<button class="btn btn-xs btn-ghost btn-circle" onclick="this.parentElement.remove()">✕</button>';
+        document.getElementById('constantsList').appendChild(div);
+      }
+
+      function getConstants() {
+        var rows = document.querySelectorAll('#constantsList > div');
+        var arr = [];
+        rows.forEach(function(row) {
+          var k = row.querySelector('.const-key').value.trim();
+          var v = row.querySelector('.const-val').value.trim();
+          if (k) {
+            try { v = JSON.parse(v); } catch(e) { /* keep as string */ }
+            arr.push({key: k, value: v});
+          }
+        });
+        return arr;
+      }
+
+      function setConstants(arr) {
+        document.getElementById('constantsList').innerHTML = '';
+        if (arr && arr.length) {
+          arr.forEach(function(c) { addConstant(c.key, c.value); });
+        }
+      }
+
+      // ── Toast ──
+      function showToast(msg, isError) {
+        var el = document.getElementById('statusToast');
+        var alertEl = el.querySelector('.alert');
+        alertEl.className = 'alert ' + (isError ? 'alert-error' : 'alert-success');
+        document.getElementById('statusMsg').textContent = msg;
+        el.style.display = '';
+        setTimeout(function() { el.style.display = 'none'; }, 3000);
+      }
+
+      // ── Load Jobs list ──
+      async function loadJobs() {
+        try {
+          var resp = await fetch('/api/v2/jobs');
+          var data = await resp.json();
+          // API returns {"jobs": [...], "count": N}
+          var jobs = data.jobs || data || [];
+          var sel = document.getElementById('jobSelect');
+          sel.innerHTML = '<option value="">— Select a Job —</option>';
+          jobs.forEach(function(j) {
+            var opt = document.createElement('option');
+            opt.value = j.id;
+            opt.textContent = j.name || j.id;
+            sel.appendChild(opt);
+          });
+          // Auto-select from URL param
+          var params = new URLSearchParams(window.location.search);
+          var jobParam = params.get('job_id');
+          if (jobParam) {
+            sel.value = jobParam;
+            currentJobId = jobParam;
+            loadEventing();
+          }
+        } catch(e) {
+          console.error('Failed to load jobs', e);
+        }
+      }
+
+      // ── Load Eventing config for selected job ──
+      async function loadEventing() {
+        if (!currentJobId) { showToast('Select a job first', true); return; }
+        try {
+          var resp = await fetch('/api/v2/jobs/' + currentJobId + '/eventing');
+          var data = await resp.json();
+          if (data.error) { showToast(data.error, true); return; }
+          var ev = data.eventing || {};
+          editor.setValue(ev.handler || 'function OnUpdate(doc, meta) {\n    return doc;\n}\n\nfunction OnDelete(meta) {\n    log("deleted", meta._id);\n}');
+          document.getElementById('eventingEnabled').checked = !!ev.enabled;
+          document.getElementById('settTimeout').value = ev.timeout_ms || 5000;
+          document.getElementById('settDescription').value = ev.description || '';
+          document.getElementById('settOnError').value = ev.on_error || 'reject';
+          document.getElementById('settOnTimeout').value = ev.on_timeout || 'reject';
+          setConstants(ev.constants);
+          updateEnabledBadge();
+          showToast('Loaded eventing config');
+        } catch(e) {
+          showToast('Load failed: ' + e.message, true);
+        }
+      }
+
+      // ── Save Eventing config ──
+      async function saveEventing() {
+        if (!currentJobId) { showToast('Select a job first', true); return; }
+        var payload = {
+          enabled: document.getElementById('eventingEnabled').checked,
+          handler: editor.getValue(),
+          timeout_ms: parseInt(document.getElementById('settTimeout').value, 10) || 5000,
+          description: document.getElementById('settDescription').value,
+          on_error: document.getElementById('settOnError').value,
+          on_timeout: document.getElementById('settOnTimeout').value,
+          constants: getConstants()
+        };
+        try {
+          var resp = await fetch('/api/v2/jobs/' + currentJobId + '/eventing', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+          });
+          var data = await resp.json();
+          if (data.error) { showToast(data.error, true); return; }
+          updateEnabledBadge();
+          showToast('Saved!');
+          showRestartRequiredToast();
+        } catch(e) {
+          showToast('Save failed: ' + e.message, true);
+        }
+      }
+
+      function showRestartRequiredToast() {
+        var container = document.getElementById('toastContainer');
+        var id = 'restartRequiredToast';
+        if (document.getElementById(id)) return;
+        var el = document.createElement('div');
+        el.id = id;
+        el.className = 'alert alert-warning shadow-lg';
+        el.style.cssText = 'border-left:4px solid #f59e0b;max-width:420px';
+        el.innerHTML =
+          '<div class="flex flex-col gap-2 w-full">' +
+            '<span>Eventing saved. Restart the job to apply changes?</span>' +
+            '<div class="flex gap-2">' +
+              '<button class="btn btn-sm btn-warning" id="restartNowBtn">Restart Now</button>' +
+              '<button class="btn btn-sm btn-ghost" onclick="document.getElementById(\'' + id + '\').remove()">Dismiss</button>' +
+            '</div>' +
+            '<div id="restartStatus" class="text-xs hidden"></div>' +
+          '</div>';
+        container.appendChild(el);
+
+        document.getElementById('restartNowBtn').addEventListener('click', function() {
+          var btn = this;
+          var status = document.getElementById('restartStatus');
+          btn.classList.add('loading');
+          btn.textContent = 'Restarting...';
+          status.classList.remove('hidden');
+          status.textContent = '⏳ Sending restart signal...';
+
+          fetch('/api/jobs/' + encodeURIComponent(currentJobId) + '/restart', { method: 'POST' })
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+              if (data.error) {
+                status.textContent = '⚠️ ' + data.error;
+                btn.classList.remove('loading');
+                btn.textContent = 'Restart Now';
+                return;
+              }
+              btn.classList.remove('loading', 'btn-warning');
+              btn.classList.add('btn-disabled');
+              status.textContent = '🔄 Job restarting — applying eventing changes...';
+              var attempts = 0;
+              var pollId = setInterval(function() {
+                attempts++;
+                status.textContent = '🔄 Waiting for job... (' + attempts + 's)';
+                fetch('/api/jobs/' + encodeURIComponent(currentJobId)).then(function(r) { return r.json(); }).then(function(j) {
+                  var st = (j.state && j.state.status) || j.status;
+                  if (st === 'running') {
+                    clearInterval(pollId);
+                    status.textContent = '✅ Job is running with updated eventing config!';
+                    btn.textContent = '✓ Done';
+                    btn.classList.remove('btn-disabled');
+                    btn.classList.add('btn-success');
+                    setTimeout(function() { el.remove(); }, 3000);
+                  }
+                }).catch(function() {});
+                if (attempts > 30) {
+                  clearInterval(pollId);
+                  status.textContent = '⚠️ Restart sent but job took too long. Check logs.';
+                  btn.classList.remove('loading', 'btn-disabled');
+                  btn.textContent = 'Retry';
+                }
+              }, 1000);
+            })
+            .catch(function(err) {
+              status.textContent = '❌ ' + err.message;
+              btn.classList.remove('loading');
+              btn.textContent = 'Restart Now';
+            });
+        });
+      }
+
+      function updateEnabledBadge() {
+        var badge = document.getElementById('enabledBadge');
+        if (document.getElementById('eventingEnabled').checked) {
+          badge.textContent = 'enabled';
+          badge.className = 'badge badge-success badge-sm';
+        } else {
+          badge.textContent = 'disabled';
+          badge.className = 'badge badge-ghost badge-sm';
+        }
+        badge.classList.remove('hidden');
+      }
+
+      // ── Debug ──
+      function debugHandler() {
+        var panel = document.getElementById('debugPanel');
+        panel.style.display = panel.style.display === 'none' ? '' : 'none';
+      }
+
+      function runDebug() {
+        var docText = document.getElementById('debugDoc').value;
+        var resultEl = document.getElementById('debugResult');
+        try {
+          var doc = JSON.parse(docText);
+          var meta = {_id: doc._id, _rev: doc._rev};
+          var body = Object.assign({}, doc);
+          delete body._id;
+          delete body._rev;
+          var isDelete = document.getElementById('debugIsDelete').checked;
+          var code = editor.getValue();
+          // Simple local eval for preview (not V8, just browser JS)
+          var logs = [];
+          var evalCode = 'var __logs = [];\nfunction log() { __logs.push(Array.from(arguments).join(" ")); }\n' + code;
+          if (isDelete) {
+            evalCode += '\nvar __result = typeof OnDelete === "function" ? OnDelete(' + JSON.stringify(meta) + ') : undefined;';
+          } else {
+            evalCode += '\nvar __result = typeof OnUpdate === "function" ? OnUpdate(' + JSON.stringify(body) + ', ' + JSON.stringify(meta) + ') : undefined;';
+          }
+          evalCode += '\n({result: __result, logs: __logs})';
+          var output = eval(evalCode);
+          var display = {
+            result: output.result,
+            logs: output.logs,
+            action: output.result === false || output.result === undefined || output.result === null ? 'REJECTED' : 'PASSED'
+          };
+          resultEl.textContent = JSON.stringify(display, null, 2);
+          resultEl.style.color = display.action === 'REJECTED' ? '#e53e3e' : '#38a169';
+        } catch(e) {
+          resultEl.textContent = 'Error: ' + e.message;
+          resultEl.style.color = '#e53e3e';
+        }
+      }
+
+      // ── Job selector ──
+      document.getElementById('jobSelect').addEventListener('change', function() {
+        currentJobId = this.value;
+        if (currentJobId) loadEventing();
+      });
+
+      document.getElementById('eventingEnabled').addEventListener('change', updateEnabledBadge);
+
+      // ── Init ──
+      loadJobs();
     </script>
   </body>
 </html>

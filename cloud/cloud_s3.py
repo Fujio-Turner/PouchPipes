@@ -284,6 +284,8 @@ class S3OutputForwarder(BaseCloudForwarder):
                 return "auth"
             if code in ("SlowDown", "RequestTimeout") or status == 429:
                 return "rate_limit"
+            if code == "EntityTooLarge":
+                return "payload_too_large"
             if status >= 500:
                 return "server_error"
             return "client_error"

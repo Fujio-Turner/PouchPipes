@@ -33,14 +33,32 @@ except ImportError:
 # MySQL error codes that are transient (worth retrying).
 _TRANSIENT_MYSQL_CODES = frozenset(
     {
-        1040,  # Too many connections
-        1205,  # Lock wait timeout exceeded
-        1213,  # Deadlock found when trying to get lock
-        2002,  # Can't connect to local MySQL server
-        2003,  # Can't connect to MySQL server
-        2006,  # MySQL server has gone away
-        2013,  # Lost connection to MySQL server during query
-        2055,  # Lost connection to MySQL server
+        # Resource exhaustion
+        1021,  # ER_DISK_FULL
+        1037,  # ER_OUTOFMEMORY
+        1038,  # ER_OUT_OF_SORTMEMORY
+        1040,  # ER_CON_COUNT_ERROR (too many connections)
+        1041,  # ER_OUT_OF_RESOURCES
+        1114,  # ER_RECORD_FILE_FULL (table is full)
+        # Server lifecycle
+        1053,  # ER_SERVER_SHUTDOWN
+        # Schema (may be recreated)
+        1146,  # ER_NO_SUCH_TABLE — table may be recreated
+        # Network
+        1158,  # ER_NET_READ_ERROR
+        1159,  # ER_NET_READ_INTERRUPTED
+        1160,  # ER_NET_ERROR_ON_WRITE
+        1161,  # ER_NET_WRITE_INTERRUPTED
+        # Lock / deadlock
+        1205,  # ER_LOCK_WAIT_TIMEOUT
+        1206,  # ER_LOCK_TABLE_FULL (lock table exhausted)
+        1213,  # ER_LOCK_DEADLOCK
+        # Connection (client-side)
+        2002,  # CR_CONNECTION_ERROR
+        2003,  # CR_CONN_HOST_ERROR
+        2006,  # CR_SERVER_GONE_ERROR
+        2013,  # CR_SERVER_LOST
+        2055,  # CR_SERVER_LOST_EXTENDED
     }
 )
 
@@ -125,12 +143,6 @@ class MySQLOutputForwarder(BaseOutputForwarder):
             pool.close()
             await pool.wait_closed()
             log_event(logger, "info", "OUTPUT", "MySQL pool closed")
-
-    async def _reconnect_pool(self) -> None:
-        ic("_reconnect_pool")
-        async with self._pool_lock:
-            await self._close_pool()
-            await self._connect_pool()
 
     # ── MySQL SQL generation helpers ────────────────────────────────────
 
@@ -251,16 +263,49 @@ class MySQLOutputForwarder(BaseOutputForwarder):
         if isinstance(exc, aiomysql.Error):
             code = getattr(exc, "args", (None,))[0]
             if isinstance(code, int):
+                # Connection
                 if code in (2002, 2003, 2006, 2013, 2055):
                     return "connection"
+                # Network
+                if code in (1158, 1159, 1160, 1161):
+                    return "connection"
+                # Lock / deadlock
                 if code in (1205, 1213):
                     return "deadlock"
-                if code in (1062, 1451, 1452, 1557):
+                if code == 1206:
+                    return "lock_contention"
+                # Resource exhaustion
+                if code in (1021, 1037, 1038, 1040, 1041, 1114):
+                    return "resource_exhaustion"
+                # Server lifecycle
+                if code == 1053:
+                    return "server_shutdown"
+                # Constraint violations
+                if code in (1062, 1557):
                     return "constraint_violation"
-                if code in (1264, 1366, 1292):
+                if code in (1451, 1452, 1216, 1217):
+                    return "constraint_violation"
+                if code in (1048, 1364):
+                    return "constraint_violation"
+                if code == 3819:
+                    return "constraint_violation"
+                # Data type errors
+                if code in (1264, 1265, 1366, 1292, 1406, 1411):
                     return "data_type"
-                if code in (1054, 1146, 1064):
+                # Schema (table may be recreated)
+                if code == 1146:
+                    return "table_not_found"
+                # Syntax / schema (permanent)
+                if code in (1054, 1064, 1136):
                     return "syntax_or_schema"
+                # Auth / permission (permanent)
+                if code in (1044, 1045, 1142):
+                    return "auth_failure"
+                # Database config (permanent)
+                if code in (1046, 1049):
+                    return "invalid_database"
+                if code == 1290:
+                    return "read_only"
                 return f"mysql_{code}"
         return "unknown"
 

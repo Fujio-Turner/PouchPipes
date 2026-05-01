@@ -497,9 +497,10 @@ class TestSchemaMapperMapDocument(unittest.TestCase):
         # order_doc_id should come from the parent doc's _id
         for ins in inserts:
             self.assertEqual(ins.data["order_doc_id"], "order::001")
-        # product_id should come from the item (no transform applied)
-        self.assertEqual(inserts[0].data["product_id"], "WIDGET-A")
-        self.assertEqual(inserts[1].data["product_id"], "GADGET-B")
+        # product_id is sourced from the item with toLowerCase() applied per
+        # the orders mapping
+        self.assertEqual(inserts[0].data["product_id"], "widget-a")
+        self.assertEqual(inserts[1].data["product_id"], "gadget-b")
 
     def test_upsert_with_orders_mapping_applies_transforms(self):
         mapper = SchemaMapper(_load_orders_mapping())

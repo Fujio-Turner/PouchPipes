@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/changes-worker/dlq_meta.schema.json",
+  "title": "DLQ Metadata",
+  "description": "Tracks batch-level DLQ timestamps globally and per-job. Single document with key 'dlq:meta' in the changes-worker.dlq collection. Fetched via simple GET (no N1QL query). Updated once per batch, not per document.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "dlq_meta",
+      "description": "Document type identifier"
+    },
+    "last_inserted_at": {
+      "type": ["integer", "null"],
+      "description": "Unix epoch when the most recent batch wrote entries to the DLQ (global — latest across all jobs)"
+    },
+    "last_inserted_job": {
+      "type": ["string", "null"],
+      "description": "Job identity (checkpoint.client_id) of the batch that last inserted"
+    },
+    "last_drained_at": {
+      "type": ["integer", "null"],
+      "description": "Unix epoch when the most recent replay successfully drained entries (global — latest across all jobs)"
+    },
+    "last_drained_job": {
+      "type": ["string", "null"],
+      "description": "Job identity that performed the last drain"
+    },
+    "jobs": {
+      "type": "object",
+      "description": "Per-job DLQ history. Keyed by job_id, each entry tracks that job's own insert/drain timestamps independently.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "last_inserted_at": {
+            "type": ["integer", "null"],
+            "description": "Unix epoch when this job last wrote entries to the DLQ"
+          },
+          "last_drained_at": {
+            "type": ["integer", "null"],
+            "description": "Unix epoch when this job last drained entries from the DLQ"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "type"
+  ],
+  "additionalProperties": false,
+  "examples": [
+    {
+      "type": "dlq_meta",
+      "last_inserted_at": 1745678900,
+      "last_inserted_job": "job::aaa",
+      "last_drained_at": 1745679200,
+      "last_drained_job": "job::bbb",
+      "jobs": {
+        "job::aaa": {
+          "last_inserted_at": 1745678900,
+          "last_drained_at": 1745679100
+        },
+        "job::bbb": {
+          "last_inserted_at": 1745670000,
+          "last_drained_at": 1745679200
+        }
+      }
+    },
+    {
+      "type": "dlq_meta",
+      "last_inserted_at": null,
+      "last_inserted_job": null,
+      "last_drained_at": null,
+      "last_drained_job": null,
+      "jobs": {}
+    }
+  ]
+}

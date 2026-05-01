@@ -182,19 +182,22 @@ SELECT * FROM orders WHERE amount > 100      ✓ Works
 
 **Strict mode** (strict=true):
 - Extra columns cause **validation error**
-- Document is marked as invalid
-- DLQ handling depends on `dlq_on_error` setting
+- Document is marked as invalid and **not sent to SQL execution**
+- When `dlq_on_error=true`, the doc is routed to DLQ with `error_class: "validation"` (see [FAILURE_OPTION_OUTPUT_RDBMS.md](FAILURE_OPTION_OUTPUT_RDBMS.md) §2.13)
 - ✅ Stricter data quality enforcement
 
 ### DLQ Routing
 
-When `dlq_on_error=true` (default), invalid documents trigger metrics:
+When `strict=true` and `dlq_on_error=true` (default), documents that fail validation are routed to the DLQ with `error_class: "validation"` and are **not** sent to SQL execution. In lenient mode (`strict=false`), coerced data proceeds to output normally.
+
+Monitor with these metrics:
 
 ```
 changes_worker_db_validation_errors_total{engine="postgres",job_id="orders_sync"} 5
+changes_worker_validation_coercions_total{job_id="orders_sync"} 42
 ```
 
-You can monitor this metric and inspect failed documents in the DLQ.
+The `validation_coercions_total` metric tracks how many values were coerced (available in default log output at INFO level). Full data quality collection writes are planned for v2.1.
 
 ## Performance
 
@@ -283,7 +286,7 @@ A: Reload the mapping files (via REST API or file watch) and validators rebuild 
 A: Yes, enable `debug` logs and search for `[VALIDATION] value coerced`.
 
 **Q: What if a value can't be coerced?**  
-A: It becomes NULL (unless strict mode rejects the whole document).
+A: In lenient mode (`strict=false`), it becomes NULL and a coercion is logged at INFO level. In strict mode (`strict=true`), the entire document is rejected — routed to DLQ if `dlq_on_error=true`, or skipped if `dlq_on_error=false`.
 
 **Q: Can I use this without schema mappings?**  
 A: No, validation requires column type info from mappings.

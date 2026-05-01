@@ -63,10 +63,10 @@ All settings live in a single `config.json` file. Here is a complete reference w
       "bearer_token": ""
     },
     "retry": {                       // Output-specific retry (separate from gateway)
-      "max_retries": 3,
-      "backoff_base_seconds": 1,
-      "backoff_max_seconds": 30,
-      "retry_on_status": [500, 502, 503, 504]
+     "max_retries": 3,
+     "backoff_base_seconds": 1,
+     "backoff_max_seconds": 30,
+     "retry_on_status": [500, 502, 503, 504, 507]
     },
     "halt_on_failure": true,         // Stop & freeze checkpoint if output fails
     "log_response_times": true,      // Track min/max/avg response times per batch
@@ -103,7 +103,7 @@ All settings live in a single `config.json` file. Here is a complete reference w
     "max_retries": 5,
     "backoff_base_seconds": 1,
     "backoff_max_seconds": 60,
-    "retry_on_status": [500, 502, 503, 504]
+    "retry_on_status": [500, 502, 503, 504, 507]
   },
 
   "attachments": {

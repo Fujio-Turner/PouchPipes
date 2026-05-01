@@ -20,6 +20,7 @@ from typing import Optional, Any, Dict
 
 import aiohttp.web
 
+from pipeline.pipeline_logging import log_event
 from pipeline.pipeline_manager import PipelineManager
 
 logger = logging.getLogger("changes_worker")
@@ -65,20 +66,22 @@ async def api_job_start(
             status=400,
         )
 
-    logger.info(f"[JOB_CONTROL] Starting job {job_id}")
+    log_event(logger, "info", "CONTROL", "starting job", job_id=job_id)
     loop = asyncio.get_event_loop()
     try:
         # Check if already running before attempting start
         state = await loop.run_in_executor(None, manager.get_job_state, job_id)
         if state and state.get("status") == "running":
-            logger.info(f"[JOB_CONTROL] Job {job_id} already running")
+            log_event(logger, "info", "CONTROL", "job already running", job_id=job_id)
             return aiohttp.web.json_response(
                 {"status": "already_running", "job_id": job_id},
                 status=409,
             )
 
         success = await loop.run_in_executor(None, manager.start_job, job_id)
-        logger.info(f"[JOB_CONTROL] Job {job_id} start result: {success}")
+        log_event(
+            logger, "info", "CONTROL", "job start result: %s" % success, job_id=job_id
+        )
         if success:
             return aiohttp.web.json_response(
                 {"status": "started", "job_id": job_id},
@@ -90,7 +93,14 @@ async def api_job_start(
                 status=500,
             )
     except Exception as exc:
-        logger.error(f"[JOB_CONTROL] Error starting job {job_id}: {exc}")
+        log_event(
+            logger,
+            "error",
+            "CONTROL",
+            "error starting job",
+            job_id=job_id,
+            error_detail="%s: %s" % (type(exc).__name__, exc),
+        )
         return aiohttp.web.json_response(
             {"error": str(exc)},
             status=500,
@@ -109,6 +119,7 @@ async def api_job_stop(
             status=400,
         )
 
+    log_event(logger, "info", "CONTROL", "stopping job", job_id=job_id)
     loop = asyncio.get_event_loop()
     success = await loop.run_in_executor(None, manager.stop_job, job_id)
     if success:
@@ -117,8 +128,16 @@ async def api_job_stop(
             status=200,
         )
     else:
+        log_event(
+            logger,
+            "error",
+            "CONTROL",
+            "failed to stop job",
+            job_id=job_id,
+            error_detail="stop timed out",
+        )
         return aiohttp.web.json_response(
-            {"error": f"Failed to stop job {job_id} within timeout"},
+            {"error": "Failed to stop job %s within timeout" % job_id},
             status=500,
         )
 
@@ -135,6 +154,7 @@ async def api_job_restart(
             status=400,
         )
 
+    log_event(logger, "info", "CONTROL", "restarting job", job_id=job_id)
     loop = asyncio.get_event_loop()
     success = await loop.run_in_executor(None, manager.restart_job, job_id)
     if success:
@@ -143,8 +163,16 @@ async def api_job_restart(
             status=200,
         )
     else:
+        log_event(
+            logger,
+            "error",
+            "CONTROL",
+            "failed to restart job",
+            job_id=job_id,
+            error_detail="restart returned false",
+        )
         return aiohttp.web.json_response(
-            {"error": f"Failed to restart job {job_id}"},
+            {"error": "Failed to restart job %s" % job_id},
             status=500,
         )
 
@@ -161,6 +189,7 @@ async def api_job_kill(
             status=400,
         )
 
+    log_event(logger, "info", "CONTROL", "killing job", job_id=job_id)
     # For now, kill is the same as stop (hard stop)
     loop = asyncio.get_event_loop()
     success = await loop.run_in_executor(None, manager.stop_job, job_id)
@@ -170,8 +199,16 @@ async def api_job_kill(
             status=200,
         )
     else:
+        log_event(
+            logger,
+            "error",
+            "CONTROL",
+            "failed to kill job",
+            job_id=job_id,
+            error_detail="kill returned false",
+        )
         return aiohttp.web.json_response(
-            {"error": f"Failed to kill job {job_id}"},
+            {"error": "Failed to kill job %s" % job_id},
             status=500,
         )
 
@@ -204,6 +241,7 @@ async def api_restart_all(
     manager: PipelineManager,
 ) -> aiohttp.web.Response:
     """POST /api/_restart — Restart all jobs."""
+    log_event(logger, "info", "CONTROL", "restart all requested via /api/_restart")
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, manager.restart_all)
     states = await loop.run_in_executor(None, manager.list_job_states)
@@ -223,6 +261,7 @@ async def api_offline_all(
             {"status": "already_offline"},
             status=200,
         )
+    log_event(logger, "info", "CONTROL", "offline requested via /api/_offline")
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, manager.go_offline)
     return aiohttp.web.json_response(
@@ -241,6 +280,7 @@ async def api_online_all(
             {"status": "already_online"},
             status=200,
         )
+    log_event(logger, "info", "CONTROL", "online requested via /api/_online")
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, manager.go_online)
     states = await loop.run_in_executor(None, manager.list_job_states)

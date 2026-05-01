@@ -2,6 +2,86 @@
 
 ---
 
+## v2.3.0 — 2026-05-01
+
+### New Features
+
+- **Eventing / JavaScript transforms (V8)** — New `eventing/` module with a V8-backed JS runtime that runs per-document transform scripts inline in the pipeline. New API endpoints, schema fields on jobs (`eventing` block), recursion-guard to prevent infinite loops, and a CodeMirror-based editor in `web/templates/eventing.html` with linting (jshint), bracket matching, and code folding. Documented in `docs/DESIGN_EVENTING.md` and `docs/EVENTING_JS.md`.
+
+- **Log collection / debug bundle** — New `rest/log_collect.py` API and `csdb_collect.sh` script that gather logs, config, metrics, and diagnostic info into a single bundle for support / troubleshooting. Documented in `docs/LOG_COLLECTION_API.md`, `docs/LOG_COLLECTION_PLAN.md`, `docs/LOG_COLLECTION_QUICKSTART.md`, and `docs/DEBUGGING_TOOL_PLAN.md`.
+
+- **Logs viewer redesign** (`web/templates/logs.html`) — Full rewrite of the in-app log viewer with filtering, search, level highlighting, and live tail. Backed by expanded `web/server.py` log endpoints.
+
+- **Metrics dashboard** (`metrics.html`, `docs/METRICS.md`) — New standalone metrics page with charts for throughput, latency, queue depth, error rate, and per-output stats. Pipeline now exposes the metrics needed to drive it.
+
+- **Greedy `_changes` feed processing** (`rest/changes_http.py`) — Reworked `_changes` consumer to drain available batches greedily before yielding to the event loop, significantly improving throughput on busy sources. Documented in `docs/CHANGES_PROCESSING.md`.
+
+- **`_deleted` / `_removed` tracking and processing** — Tombstone documents (`_deleted: true`) and channel-removed documents (`_removed: true`) are now explicitly tracked, counted in metrics, and routed through outputs (translated to DELETE statements for RDBMS, etc.).
+
+- **Source connection tester** (`web/static/js/source-test.js`) — New "Test connection" UX in the Inputs page that validates source URL, credentials, and `_changes` access before saving.
+
+- **Comprehensive logging guide** (`guides/GUIDE_LOGGING.md`) — 1000+ line reference covering log levels, redaction, structured fields, per-component loggers, eventing logs, and the new logs.html viewer.
+
+### Changes
+
+- **Repository reorganized into modules** — Top-level files moved into folders for clarity: `cbl_store.py` → `storage/`, `pipeline.py` / `pipeline_manager.py` / `pipeline_logging.py` → `pipeline/`, `sg_order_loader.py` → `load_gen/`, eventing into `eventing/`, REST handlers into `rest/`, DB drivers into `db/`, cloud outputs into `cloud/`, schema/validator into `schema/`. All imports updated.
+
+- **Stdout output removed** — The `stdout` output mode and `outputs_stdout` schema have been removed. Use `http`, `rdbms`, or `cloud` outputs instead. (`json_schema/changes-worker/outputs_stdout/schema.json` deleted.)
+
+- **DB outage recovery hardened** (`db/db_base.py`, `db/db_postgres.py`, `db/db_mssql.py`, `db/db_mysql.py`, `db/db_oracle.py`) — Multiple bug fixes around pool reconnection during stop/start of the destination database: cooldown guard no longer blocks recovery on a dead pool, generation counter is bumped on failed reconnects, parallel-mode stampede no longer returns false success, WebSocket mode now wraps catch-up + stream in an outer retry loop, `ws.close()` is bounded to 5s so it cannot block the reconnect path, and a background `_health_check_loop` proactively restores the pool while the feed loop is in backoff. Documented in `docs/FAILURE_OPTION_OUTPUT_RDBMS.md`.
+
+- **HTTP and cloud output failure handling** (`rest/output_http.py`, `cloud/cloud_base.py`, `cloud/cloud_s3.py`) — Aligned with the RDBMS resilience model: retries with exponential backoff, halt-on-failure honored, metrics for retries/halts. Documented in `docs/FAILURE_OPTION_OUTPUT_HTTP.md` and `docs/FAILURE_OPTION_OUTPUT_CLOUD.md`.
+
+- **Byte counting for DELETEs** — `db/db_base.py` and `cloud/cloud_base.py` now count bytes processed for delete operations so throughput metrics aren't undercounted when tombstones dominate.
+
+- **`_changes` retry fix** — Fixed a regression where transient `_changes` feed errors were not being retried.
+
+- **Eventing recursion guard** (`eventing/recursion_guard.py`) — Prevents JS scripts from indirectly triggering themselves via outputs that feed back into the source, avoiding runaway loops.
+
+- **Attachment post-processing** — Major rewrite of `rest/attachment_postprocess.py` (455+ lines added) for more robust streaming, retries, and error reporting. New `docs/ATTACHMENTS.md`.
+
+- **Job schema additions** — `json_schema/changes-worker/jobs/schema.json` extended with `eventing` block and additional control fields. `dlq_meta` schema added (`json_schema/changes-worker/dlq/dlq_meta.schema.json`).
+
+- **Architecture diagrams refreshed** (`img/architecture.png`, `img/architecture_attach.png`, `img/pipeline-overview.png`).
+
+- **Help page** (`web/templates/help.html`) — Massive expansion (4000+ lines) covering eventing, new outputs, failure handling, and the metrics dashboard.
+
+- **Version bump** — All footers and version references updated from v2.2.2 to v2.3.0.
+
+### New Files
+
+- `eventing/__init__.py`, `eventing/eventing.py`, `eventing/recursion_guard.py` — V8 JS eventing module
+- `storage/__init__.py`, `storage/cbl_store.py` — moved from top-level
+- `pipeline/__init__.py`, `pipeline/pipeline.py`, `pipeline/pipeline_logging.py`, `pipeline/pipeline_manager.py` — moved from top-level
+- `load_gen/sg_order_loader.py`, `load_gen/edge_order_loader.py` — load generators
+- `rest/log_collect.py` — log collection API
+- `csdb_collect.sh` — diagnostic bundle collector
+- `apply_http_fixes.py` — HTTP migration helper
+- `metrics.html` — metrics dashboard (expanded)
+- `web/static/js/source-test.js` — source connection tester
+- `web/static/css/codemirror/*`, `web/static/js/codemirror/*` — CodeMirror assets for the eventing editor
+- `docs/DESIGN_EVENTING.md`, `docs/EVENTING_JS.md`, `docs/METRICS.md`, `docs/CHANGES_PROCESSING.md`, `docs/ATTACHMENTS.md`
+- `docs/FAILURE_OPTION_OUTPUT_HTTP.md`, `docs/FAILURE_OPTION_OUTPUT_RDBMS.md`, `docs/FAILURE_OPTION_OUTPUT_CLOUD.md`
+- `docs/LOG_COLLECTION_API.md`, `docs/LOG_COLLECTION_PLAN.md`, `docs/LOG_COLLECTION_QUICKSTART.md`, `docs/DEBUGGING_TOOL_PLAN.md`
+- `guides/GUIDE_LOGGING.md` — comprehensive logging guide
+- `tests/test_log_collect.py` — log collection tests
+- `json_schema/changes-worker/dlq/dlq_meta.schema.json` — DLQ metadata schema
+- `IMPLEMENTATION_LOG_COLLECTION.md`, `CBL_OPERATIONS_ANALYSIS.md` — internal design notes
+
+### Removed
+
+- `outputs_stdout` output mode and its JSON schema
+- Top-level `cbl_store.py`, `pipeline.py`, `pipeline_manager.py`, `pipeline_logging.py`, `sg_order_loader.py` (moved into folders)
+- Stale profile SVG (`logs/profile4.svg`)
+
+### ⚠️ Migration Notes
+
+- **Stdout output removed.** If your `outputs` config contains a stdout entry, replace it with an `http` (e.g., to a local sink), `rdbms`, or `cloud` output before upgrading.
+- **Imports moved.** External integrations that imported `cbl_store`, `pipeline`, `pipeline_manager`, or `pipeline_logging` from the top level must now import from `storage.cbl_store`, `pipeline.pipeline`, `pipeline.pipeline_manager`, or `pipeline.pipeline_logging`.
+- **Eventing is opt-in.** Existing jobs without an `eventing` block continue to run unchanged.
+
+---
+
 ## v2.2.2 — 2026-04-22
 
 ### New Features

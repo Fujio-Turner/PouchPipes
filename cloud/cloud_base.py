@@ -11,6 +11,7 @@ import abc
 import asyncio
 import json
 import logging
+import random
 import re
 import threading
 import time
@@ -200,7 +201,17 @@ def render_key(
         val = variables.get(m.group(1), m.group(0))
         return _sanitize_key_part(val) if sanitize else val
 
-    return _KEY_VAR_RE.sub(_replace, template)
+    key = _KEY_VAR_RE.sub(_replace, template)
+    key_bytes = len(key.encode("utf-8"))
+    if key_bytes > 1024:
+        log_event(
+            logger,
+            "warn",
+            "OUTPUT",
+            "rendered key exceeds 1024-byte cloud provider limit (%d bytes)"
+            % key_bytes,
+        )
+    return key
 
 
 # ── Abstract base forwarder ─────────────────────────────────────────────────
@@ -248,6 +259,7 @@ class BaseCloudForwarder(abc.ABC):
         self._batch_bytes: int = 0
         self._batch_lock = asyncio.Lock()
         self._batch_timer_task: asyncio.Task | None = None
+        self._sse_error_logged = False
 
         self._job_id = out_cfg.get("job_id", "")
 
@@ -436,7 +448,7 @@ class BaseCloudForwarder(abc.ABC):
         if doc is None:
             log_event(
                 logger,
-                "info",
+                "debug",
                 "OUTPUT",
                 "received None doc – skipped",
                 doc_id="unknown",
@@ -455,7 +467,7 @@ class BaseCloudForwarder(abc.ABC):
                 ic("send: delete ignored", doc_id, key)
                 log_event(
                     logger,
-                    "info",
+                    "debug",
                     "OUTPUT",
                     "delete ignored (on_delete=ignore) – skipped",
                     doc_id=doc_id,
@@ -477,7 +489,7 @@ class BaseCloudForwarder(abc.ABC):
             action = "DELETE" if is_delete else "PUT"
             log_event(
                 logger,
-                "info",
+                "debug",
                 "OUTPUT",
                 "[DRY RUN] %s %s" % (action, key),
                 doc_id=doc_id,
@@ -516,8 +528,8 @@ class BaseCloudForwarder(abc.ABC):
 
         if self._metrics:
             self._metrics.inc("output_requests_total")
-            self._metrics.inc("output_success_total")
             self._metrics.inc("bytes_uploaded_total", body_len)
+            self._metrics.inc("bytes_output_total", body_len)
 
         if flush_needed:
             await self._flush_batch()
@@ -552,10 +564,8 @@ class BaseCloudForwarder(abc.ABC):
         async with self._batch_lock:
             if not self._batch_buffer:
                 return {"ok": True, "flushed": 0}
-            items = self._batch_buffer
+            items = list(self._batch_buffer)
             total_bytes = self._batch_bytes
-            self._batch_buffer = []
-            self._batch_bytes = 0
             # Cancel pending timer
             if self._batch_timer_task and not self._batch_timer_task.done():
                 self._batch_timer_task.cancel()
@@ -601,7 +611,11 @@ class BaseCloudForwarder(abc.ABC):
                 if self._metrics:
                     self._metrics.inc("uploads_total")
                     self._metrics.inc("batches_flushed_total")
+                    self._metrics.inc("output_success_total", len(items))
                     self._metrics.record_output_response_time(elapsed_ms / 1000)
+                async with self._batch_lock:
+                    self._batch_buffer = []
+                    self._batch_bytes = 0
                 ic("flush_batch: OK", batch_key, len(items), round(elapsed_ms, 1))
                 log_event(
                     logger,
@@ -661,6 +675,7 @@ class BaseCloudForwarder(abc.ABC):
                         self._backoff_base * (2 ** (attempt - 1)),
                         self._backoff_max,
                     )
+                    delay *= 0.5 + random.random()  # jitter: 50–150% of base delay
                     await asyncio.sleep(delay)
 
         # Batch upload failed
@@ -717,8 +732,10 @@ class BaseCloudForwarder(abc.ABC):
                         self._metrics.inc("output_delete_total")
                         self._metrics.inc("deletes_forwarded_total")
                     else:
+                        body_len = len(body)
                         self._metrics.inc("uploads_total")
-                        self._metrics.inc("bytes_uploaded_total", len(body))
+                        self._metrics.inc("bytes_uploaded_total", body_len)
+                        self._metrics.inc("bytes_output_total", body_len)
                     self._metrics.record_output_response_time(elapsed_ms / 1000)
 
                 ic("send: OK", doc_id, action, key, round(elapsed_ms, 1))
@@ -769,6 +786,20 @@ class BaseCloudForwarder(abc.ABC):
                         mode=self._provider,
                         error_detail=f"{type(exc).__name__}: {exc}",
                     )
+                    # §3.22: First-occurrence warning for SSE/KMS config errors
+                    if not self._sse_error_logged:
+                        exc_str = str(exc).lower()
+                        if "kms" in exc_str or "sse" in exc_str or "encrypt" in exc_str:
+                            self._sse_error_logged = True
+                            log_event(
+                                logger,
+                                "critical",
+                                "OUTPUT",
+                                "Server-side encryption config error — check "
+                                "'server_side_encryption' and 'kms_key_id' in output config.",
+                                mode=self._provider,
+                                error_detail=f"{type(exc).__name__}: {exc}",
+                            )
 
                     return {
                         "ok": False,
@@ -802,6 +833,7 @@ class BaseCloudForwarder(abc.ABC):
                         self._backoff_base * (2 ** (attempt - 1)),
                         self._backoff_max,
                     )
+                    delay *= 0.5 + random.random()  # jitter: 50–150% of base delay
                     await asyncio.sleep(delay)
 
         # All retries exhausted
@@ -843,7 +875,7 @@ class BaseCloudForwarder(abc.ABC):
 
     # ── stats logging ───────────────────────────────────────────────────
 
-    def log_stats(self) -> None:
+    def log_stats(self, force_info: bool = False) -> None:
         """Log accumulated response time statistics."""
         if not self._resp_times:
             return
@@ -853,7 +885,7 @@ class BaseCloudForwarder(abc.ABC):
         hi = max(self._resp_times)
         log_event(
             logger,
-            "info",
+            "info" if force_info else "debug",
             "OUTPUT",
             "%s stats: %d ops | avg=%.1fms | min=%.1fms | max=%.1fms"
             % (self._provider.upper(), n, avg, lo, hi),

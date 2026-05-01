@@ -1,4 +1,4 @@
-# PouchPipes 🥔📦 v2.2.2
+# PouchPipes 🥔📦 v2.3.0
 
 <div align="center">
   <img src="img/PouchPipes.jpg" alt="PouchPipes Mascot" width="280" style="border-radius: 12px; margin: 20px 0;">
