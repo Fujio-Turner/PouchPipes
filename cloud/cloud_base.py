@@ -448,7 +448,7 @@ class BaseCloudForwarder(abc.ABC):
         if doc is None:
             log_event(
                 logger,
-                "info",
+                "debug",
                 "OUTPUT",
                 "received None doc – skipped",
                 doc_id="unknown",
@@ -467,7 +467,7 @@ class BaseCloudForwarder(abc.ABC):
                 ic("send: delete ignored", doc_id, key)
                 log_event(
                     logger,
-                    "info",
+                    "debug",
                     "OUTPUT",
                     "delete ignored (on_delete=ignore) – skipped",
                     doc_id=doc_id,
@@ -489,7 +489,7 @@ class BaseCloudForwarder(abc.ABC):
             action = "DELETE" if is_delete else "PUT"
             log_event(
                 logger,
-                "info",
+                "debug",
                 "OUTPUT",
                 "[DRY RUN] %s %s" % (action, key),
                 doc_id=doc_id,

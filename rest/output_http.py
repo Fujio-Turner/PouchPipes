@@ -453,7 +453,7 @@ class OutputForwarder:
             ic("send: None doc – skipped", method)
             log_event(
                 logger,
-                "info",
+                "debug",
                 "OUTPUT",
                 "received None doc – skipped",
                 doc_id="unknown",
@@ -493,7 +493,7 @@ class OutputForwarder:
         if self._dry_run:
             log_event(
                 logger,
-                "info",
+                "debug",
                 "OUTPUT",
                 "dry run",
                 operation=infer_operation(doc=doc, method=method),
@@ -1289,7 +1289,7 @@ class DeadLetterQueue:
                 seq=str(seq),
                 storage="cbl",
                 ttl_seconds=self._retention_seconds,
-                target_url=target_url,
+                url=target_url,
             )
             return
         # Original file fallback
@@ -1344,7 +1344,7 @@ class DeadLetterQueue:
             self._store.delete_dlq_entry(dlq_id)
             log_event(
                 logger,
-                "info",
+                "debug",
                 "DLQ",
                 "entry purged after successful reprocessing",
                 operation="DELETE",

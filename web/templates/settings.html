@@ -2652,9 +2652,22 @@
       });
       var data = await res.json();
       if (data.error) {
-        showToast(data.detail || data.error, 'error');
+        // Rich failure: short toast + detailed alert with URL + log pointer
+        var msg = '✗ ' + data.error;
+        if (data.status) msg += ' [HTTP ' + data.status + ']';
+        showToast(msg, 'error');
+        alert('✕ Source test failed' +
+              (data.elapsed_ms ? ' (' + data.elapsed_ms + 'ms)' : '') +
+              '\n\nURL: ' + (data.url || '?') +
+              (data.status ? ('\nHTTP Status: ' + data.status) : '') +
+              (data.error_class ? ('\nError Class: ' + data.error_class) : '') +
+              '\nError: ' + data.error +
+              (data.detail && data.detail !== data.error ? ('\n\nDetail: ' + data.detail) : '') +
+              (data.hint ? ('\n\n💡 Hint: ' + data.hint) : '') +
+              '\n\nSee the Logs page (filter [CONTROL]/[HTTP], search "test-source") for the full audit trail.');
+        console.warn('[test-source failed]', data);
       } else {
-        showToast('✓ Connected! Got ' + (data.pool_size || 1) + ' docs', 'success');
+        showToast('✓ Connected! Got ' + (data.pool_size || 1) + ' docs (' + (data.elapsed_ms || '?') + 'ms)', 'success');
       }
       status.textContent = '';
     } catch (e) {

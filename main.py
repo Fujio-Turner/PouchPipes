@@ -2104,9 +2104,14 @@ def validate_config(cfg: dict) -> tuple[str, list[str], list[str]]:
 
 def build_base_url(gw: dict) -> str:
     """Build the keyspace URL: {url}/{db}.{scope}.{collection}"""
-    base = gw["url"].rstrip("/")
+    url = gw.get("url") or gw.get("host")
+    if not url:
+        raise KeyError("'url'")
+    if "database" not in gw:
+        raise KeyError("'database'")
+    base = url.rstrip("/")
     db = gw["database"]
-    src = gw.get("src", "sync_gateway")
+    src = gw.get("src", gw.get("source_type", "sync_gateway"))
     # CouchDB has no scopes/collections concept
     if src == "couchdb":
         return f"{base}/{db}"
@@ -2120,7 +2125,7 @@ def build_base_url(gw: dict) -> str:
 
 
 def build_ssl_context(gw: dict) -> ssl.SSLContext | None:
-    url = gw["url"]
+    url = gw.get("url") or gw.get("host", "")
     if not url.startswith("https"):
         return None
     ctx = ssl.create_default_context()
@@ -3534,7 +3539,7 @@ async def poll_changes(
                 ic(changes_url, body_payload, since)
                 log_event(
                     logger,
-                    "info",
+                    "debug",
                     "CHANGES",
                     "polling _changes (since=%s, feed=%s)" % (since, feed_type),
                 )
@@ -3691,7 +3696,7 @@ async def test_connection(cfg: dict, src: str) -> bool:
     auth_cfg = cfg["auth"]
     retry_cfg = cfg.get("retry", {})
     base_url = build_base_url(gw)
-    root_url = gw["url"].rstrip("/")
+    root_url = (gw.get("url") or gw.get("host", "")).rstrip("/")
     ssl_ctx = build_ssl_context(gw)
     basic_auth = build_basic_auth(auth_cfg)
     auth_headers = build_auth_headers(auth_cfg, src, compress=gw.get("compress", False))

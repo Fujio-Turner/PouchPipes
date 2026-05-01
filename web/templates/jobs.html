@@ -742,6 +742,7 @@
 
   <!-- Sidebar -->
   <script src="/static/js/sidebar.js"></script>
+  <script src="/static/js/source-test.js"></script>
 
   <!-- Jobs Page Script -->
   <script>
@@ -780,7 +781,9 @@
 
     function showToast(message, type) {
       var container = document.getElementById('toastContainer');
-      var alertClass = type === 'success' ? 'alert-success' : 'alert-error';
+      var alertClass = type === 'success' ? 'alert-success'
+        : type === 'warning' ? 'alert-warning'
+        : 'alert-error';
       var toast = document.createElement('div');
       toast.className = 'alert ' + alertClass;
       toast.innerHTML = '<span>' + message + '</span>';
@@ -1116,46 +1119,16 @@
       window.open('/inputs', '_blank');
     }
 
+    // Delegates to /static/js/source-test.js so the test-connection
+    // behaviour matches the inputs.html page (success / "no_docs" warning /
+    // error path).
     function jbTestSourceConn(inputId) {
-      // Find the full input config from allInputs cache
       var inp = allInputs.find(function(i){ return i.id === inputId; });
       if (!inp) { alert('Input "' + inputId + '" not found in cache.'); return; }
-
-      var payload = {
-        gateway: {
-          url: inp.host || inp.url || '',
-          database: inp.database || '',
-          scope: inp.scope || '_default',
-          collection: inp.collection || '_default',
-          src: inp.source_type || 'sync_gateway',
-          accept_self_signed_certs: inp.accept_self_signed_certs || false,
-          compress: inp.compress || false
-        },
-        auth: inp.auth || { method: 'none' }
-      };
-
-      fetch('/api/wizard/test-source', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      })
-      .then(function(r){ return r.json(); })
-      .then(function(data){
-        var urlTested = payload.gateway.url + '/' + payload.gateway.database;
-        if (payload.gateway.scope && payload.gateway.scope !== '_default') {
-          urlTested += '.' + payload.gateway.scope;
-        }
-        if (payload.gateway.collection && payload.gateway.collection !== '_default') {
-          urlTested += '.' + payload.gateway.collection;
-        }
-        var authInfo = (payload.auth.method || 'none').toUpperCase();
-        if (data.error) {
-          alert('✕ Connection failed\n\nURL: ' + urlTested + '/_changes\nAuth: ' + authInfo + '\nError: ' + data.error);
-        } else {
-          alert('✓ Connection successful\n\nURL: ' + urlTested + '/_changes\nAuth: ' + authInfo + '\nDocs found: ' + (data.total || 0));
-        }
-      })
-      .catch(function(err){ alert('Test error: ' + err.message); });
+      SourceTest.test({
+        payload: SourceTest.buildPayloadFromInput(inp),
+        label: inputId
+      });
     }
 
     function jbEditSource(inputId) {

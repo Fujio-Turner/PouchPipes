@@ -885,7 +885,7 @@ class BaseOutputForwarder(abc.ABC):
         if doc is None:
             log_event(
                 logger,
-                "info",
+                "debug",
                 "OUTPUT",
                 "received None doc – skipped",
                 doc_id="unknown",
@@ -1028,7 +1028,7 @@ class BaseOutputForwarder(abc.ABC):
                 sql, params = op.to_sql()
                 log_event(
                     logger,
-                    "info",
+                    "debug",
                     "OUTPUT",
                     "[DRY RUN] %s | params=%s" % (sql, params),
                     doc_id=doc_id,

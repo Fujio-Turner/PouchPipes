@@ -59,9 +59,12 @@ def apply_fixes():
                         "HTTP output endpoint unreachable — waiting for endpoint to become available (will retry with backoff)",
                     )
                 else:
-                    logger.debug(
-                        "Output endpoint reachability check failed (attempt #%d)",
-                        output_failure_count,
+                    log_event(
+                        logger,
+                        "debug",
+                        "OUTPUT",
+                        "output endpoint reachability check failed (attempt #%d)"
+                        % output_failure_count,
                     )
                 if output_failure_count < 100:  # Safety limit
                     delay = min(backoff_base * (2 ** (output_failure_count - 1)), backoff_max)

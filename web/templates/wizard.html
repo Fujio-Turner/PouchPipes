@@ -2062,10 +2062,10 @@ var SRC_SYSTEMS = [
     icon: '📱',
     configFields: [
       { id: 'src_name', label: 'Source Name', type: 'text', required: true, placeholder: 'e.g., edge_server_1' },
-      { id: 'src_edge_url', label: 'Edge Server URL', type: 'text', required: true, placeholder: 'http://edge-device:5984' },
-      { id: 'src_database', label: 'Database Name', type: 'text', required: true, placeholder: 'local_db' },
-      { id: 'src_scope', label: 'Scope', type: 'text', required: false, placeholder: '_default' },
-      { id: 'src_collection', label: 'Collection', type: 'text', required: false, placeholder: '_default' },
+      { id: 'src_edge_url', label: 'Edge Server URL', type: 'text', required: true, placeholder: 'https://edge-device:59840 (Edge Server defaults to TLS)' },
+      { id: 'src_database', label: 'Database Name', type: 'text', required: true, placeholder: 'local_db (or full keyspace e.g. db.us.prices)' },
+      { id: 'src_scope', label: 'Scope', type: 'text', required: false, placeholder: '_default (e.g. us)' },
+      { id: 'src_collection', label: 'Collection', type: 'text', required: false, placeholder: '_default (e.g. prices)' },
       { id: 'src_username', label: 'Username', type: 'text', required: true },
       { id: 'src_password', label: 'Password', type: 'password', required: true },
       { id: 'src_accept_self_signed', label: 'Accept Self-Signed Certificates', type: 'checkbox', required: false },
@@ -2288,9 +2288,22 @@ function srcTestConnection() {
     .then(r => r.json())
     .then(data => {
       if (data.ok) {
-        showToast('✓ Connected successfully', 'success');
+        showToast('✓ Connected (HTTP ' + (data.status || '200') + ', ' + (data.elapsed_ms || '?') + 'ms)', 'success');
       } else {
-        showToast('✗ ' + (data.error || 'Connection failed'), 'error');
+        // Rich failure: URL + status + error_class + log pointer
+        var msg = '✗ ' + (data.error || 'Connection failed');
+        if (data.status) msg += ' [HTTP ' + data.status + ']';
+        showToast(msg, 'error');
+        // Detailed alert with full URL
+        alert('✕ Source test failed' +
+              (data.elapsed_ms ? ' (' + data.elapsed_ms + 'ms)' : '') +
+              '\n\nURL: ' + (data.url || '?') +
+              (data.status ? ('\nHTTP Status: ' + data.status) : '') +
+              (data.error_class ? ('\nError Class: ' + data.error_class) : '') +
+              '\nError: ' + (data.error || 'Unknown') +
+              (data.detail ? ('\n\nDetail: ' + data.detail) : '') +
+              '\n\nSee the Logs page (filter [CONTROL]/[HTTP], search "source/test") for the full audit trail.');
+        console.warn('[source/test failed]', data);
       }
       statusEl.textContent = '';
     })
@@ -3598,10 +3611,22 @@ async function testSource() {
     });
     var data = await res.json();
     if (data.error) {
-      status.textContent = (data.detail || data.error);
+      // Rich failure message: URL + status + error_class + detail + hint + log pointer
+      var parts = ['✕ ' + data.error.toUpperCase().replace(/_/g, ' ')];
+      if (data.url) parts.push('URL: ' + data.url);
+      if (data.status) parts.push('HTTP ' + data.status);
+      if (data.error_class) parts.push('Class: ' + data.error_class);
+      if (data.detail && data.detail !== data.error) parts.push(data.detail);
+      if (data.hint) parts.push('💡 ' + data.hint);
+      parts.push('See Logs page → filter [CONTROL]/[HTTP] "test-source" for full audit trail.');
+      status.innerHTML = parts.map(function(p){ return '<div>' + p.replace(/</g,'&lt;') + '</div>'; }).join('');
       status.className = 'text-sm text-error';
+      console.warn('[test-source failed]', data);
+    } else if (data.warning === 'no_docs') {
+      status.textContent = 'Connected (HTTP ' + (data.status || 200) + ', ' + (data.elapsed_ms || '?') + 'ms) — feed is empty, no docs to sample.';
+      status.className = 'text-sm text-warning';
     } else {
-      status.textContent = 'Connected! Got ' + (data.pool_size || 1) + ' docs';
+      status.textContent = 'Connected! Got ' + (data.pool_size || 1) + ' docs (' + (data.elapsed_ms || '?') + 'ms)';
       status.className = 'text-sm text-success';
       if (data.doc) {
         wizardSampleDoc = data.doc;
@@ -3629,12 +3654,24 @@ async function fetchSample() {
     });
     var data = await res.json();
     if (data.error) {
-      status.textContent = (data.detail || data.error);
+      // Rich failure message: URL + status + error_class + detail + hint + log pointer
+      var parts = ['✕ ' + data.error.toUpperCase().replace(/_/g, ' ')];
+      if (data.url) parts.push('URL: ' + data.url);
+      if (data.status) parts.push('HTTP ' + data.status);
+      if (data.error_class) parts.push('Class: ' + data.error_class);
+      if (data.detail && data.detail !== data.error) parts.push(data.detail);
+      if (data.hint) parts.push('💡 ' + data.hint);
+      parts.push('See Logs page → filter [CONTROL]/[HTTP] "test-source" for full audit trail.');
+      status.innerHTML = parts.map(function(p){ return '<div>' + p.replace(/</g,'&lt;') + '</div>'; }).join('');
       status.className = 'text-sm text-error';
+      console.warn('[fetch-sample failed]', data);
+    } else if (data.warning === 'no_docs') {
+      status.textContent = 'Connected (HTTP ' + (data.status || 200) + ', ' + (data.elapsed_ms || '?') + 'ms) — feed is empty, no docs to sample.';
+      status.className = 'text-sm text-warning';
     } else {
       wizardSampleDoc = data.doc;
       showSampleDoc(data.doc);
-      status.textContent = 'Random pick from ' + (data.pool_size || 1) + ' docs';
+      status.textContent = 'Random pick from ' + (data.pool_size || 1) + ' docs (' + (data.elapsed_ms || '?') + 'ms)';
       status.className = 'text-sm text-success';
     }
   } catch (e) {

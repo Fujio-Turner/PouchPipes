@@ -187,17 +187,17 @@ Every log line from session A has `#s:..fff134`, and the config dump at the star
 4. All subsequent log lines get `#s:..xxxxxx` (last 6 chars) in the prefix
 5. On job restart, a new session UUID is generated — the old one is gone
 
-### Example: Session Lifecycle
+### Example: Session Lifecycle (real output)
 
 ```
-[INFO] [CONTROL] job=..12345 #s:..fff134 changes_worker: session started | mode session=be560823-f023-4b6f-9fd6-a1a9fcfff134
-[INFO] [CONTROL] job=..12345 #s:..fff134 changes_worker: job config: source | mode source=sync_gateway db=travel
-[INFO] [CONTROL] job=..12345 #s:..fff134 changes_worker: job config: processing | mode sequential=True
-[INFO] [PROCESSING] job=..12345 #s:..fff134 #b:fnyhol changes_worker: batch 10 changes | 10 ok | 0 failed | 50ms
-  ... (job restarts with new config) ...
-[INFO] [CONTROL] job=..12345 #s:..3ed932 changes_worker: session started | mode session=c7dd71f3-8421-4cd1-acc3-f73adb3ed932
-[INFO] [CONTROL] job=..12345 #s:..3ed932 changes_worker: job config: processing | mode sequential=False max_concurrent=20
-[INFO] [PROCESSING] job=..12345 #s:..3ed932 #b:ww2jxo changes_worker: batch 100 changes | 99 ok | 1 failed | 200ms
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: session started | job job::2162fb33-6213-456d-93c1-213a64654e59 | mode session=...551b6a
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: source | job job::2162fb33-6213-456d-93c1-213a64654e59 | mode source=sync_gateway url=http://host.docker.internal:4984 db=db scope=us collection=prices
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: processing | job job::2162fb33-6213-456d-93c1-213a64654e59 | mode sequential=False max_concurrent=20 dry_run=False ignore_delete=False ignore_remove=False write_method=PUT get_batch_number=100
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: output | job job::2162fb33-6213-456d-93c1-213a64654e59 | mode mode=postgres host=? port=? database=? schema=public pool_min=2 pool_max=10 ssl=False
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: dlq | job job::2162fb33-6213-456d-93c1-213a64654e59 | mode dead_letter_path= retention_s=86400 max_replay=10
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: retry | job job::2162fb33-6213-456d-93c1-213a64654e59 | mode max_retries=5 backoff_base=1s backoff_max=60s retry_on_status=[500, 502, 503, 504]
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: checkpoint | job job::2162fb33-6213-456d-93c1-213a64654e59 | mode enabled=True client_id=changes_worker every_n_docs=0
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: shutdown | job job::2162fb33-6213-456d-93c1-213a64654e59 | mode drain_timeout=60s dlq_inflight=False
 ```
 
 ### Filtering by Session
@@ -497,6 +497,54 @@ These fields are used in the consolidated per-batch INFO summary:
 | `manifest_id` | `manifest` | str | Mapping manifest identifier | `\| manifest v2-orders` |
 | `maintenance_type` | `maint` | str | CBL maintenance operation type | `\| maint compact` |
 | `trigger` | `trigger` | str | What triggered the operation | `\| trigger scheduled` |
+
+#### Source Mutation Audit Fields (Attachment Post-Process PUT/DELETE)
+
+These fields are used to audit and DEBUG the writes the worker makes back to
+the **source** database during the attachment post-process stage
+(`update_doc`, `set_ttl`, `delete_doc`, `delete_attachments`, `purge`). On
+success, the source returns a **new `_rev`** which is logged as the *receipt*
+proving the operation was applied. On failure, the HTTP status and error
+class identify which class of failure occurred (timeout, 401/403, 404, 409,
+or generic).
+
+| Internal Name | Log Key | Type | Description | Example |
+|---------------|---------|------|-------------|---------|
+| `doc_rev` | `rev` | str | The current/old `_rev` sent in the PUT/DELETE request | `\| rev 12-abc123` |
+| `new_rev` | `new_rev` | str | The new `_rev` returned by the source on success — the receipt for the mutation | `\| new_rev 13-def456` |
+| `pp_action` | `pp_action` | str | The post-process action: `update_doc`, `set_ttl`, `delete_doc`, `delete_attachments`, `purge` | `\| pp_action delete_doc` |
+
+##### Outcome Coverage
+
+`rest/attachment_postprocess.py` emits a `[ATTACHMENT]` log line for every
+HTTP outcome on a source mutation. Each line carries `pp_action`, `doc_id`,
+`doc_rev` (old rev), `http_method`, `elapsed_ms`, and — when applicable —
+`status`, `new_rev`, `error_class`, and `error_detail`:
+
+| Outcome | Level | Message | Receipt Field |
+|---------|-------|---------|---------------|
+| 2xx success | `info` | `source PUT ok (receipt)` / `source DELETE ok (receipt)` | `new_rev` (the proof) |
+| Timeout / connection error | `error` | `source ... timeout/connection error` | `error_class`, `error_detail` |
+| 401 / 403 unauthorized | `error` | `source ... unauthorized` | `status`, `error_detail` |
+| 404 not found (doc gone) | `warn` | `source ... 404 not_found (doc missing)` | `status` |
+| 409 conflict (doc changed) | `warn` | `source ... 409 conflict (doc changed)` | `status` (then re-fetch + retry) |
+| Other HTTP error | `error` | `source ... http error` | `status`, `error_class`, `error_detail` |
+| Unexpected exception | `error` | `source ... unexpected error` | `error_class`, `error_detail` |
+
+Per-attempt DEBUG lines (`source ... begin`) are also emitted so you can
+trace conflict-retry loops end-to-end. To audit a specific document's
+mutations:
+
+```bash
+# Every PUT/DELETE the worker performed against the source for a doc
+grep '\[ATTACHMENT\]' logs/*_info.log logs/*_debug.log | grep 'doc_id order::12345'
+
+# Just the success receipts (new_rev = audit trail)
+grep '\[ATTACHMENT\]' logs/*_info.log | grep 'receipt' | grep 'doc_id order::12345'
+
+# All failed mutations across the cluster
+grep '\[ATTACHMENT\]' logs/*_error.log | grep -E 'pp_action (update_doc|set_ttl|delete_doc|delete_attachments|purge)'
+```
 
 ### Adding a New Field
 
@@ -822,18 +870,51 @@ This creates three files: `changes_worker_debug.log`, `changes_worker_info.log`,
 
 **All tiers use the same format.** Here's what each file looks like for the same batch:
 
-**`_info.log`** — batch summary only:
+**`_info.log`** — startup sequence + batch summary (real output):
 ```
-[INFO] [PROCESSING] job=..54e59 #s:..f7ef55 #b:mddtmi changes_worker: 16ms | batch 2 changes | 2 ok | 0 failed | out_ms 10.8 | seq_from 670640 | chkpt moved
-[INFO] [CONTROL] job=..54e59 #s:..f7ef55 changes_worker: session started | mode session=be560823-...
+[INFO] [CONTROL] changes_worker: PipelineManager starting
+[INFO] [CONTROL] changes_worker: loaded 1 enabled jobs
+[INFO] [CHANGES] changes_worker: job started | job job::2162fb33-6213-456d-93c1-213a64654e59
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: session started | job job::2162fb33-6213-456d-93c1-213a64654e59 | mode session=...551b6a
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: source | job job::2162fb33-6213-456d-93c1-213a64654e59 | mode source=sync_gateway url=http://host.docker.internal:4984 db=db scope=us collection=prices
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: processing | job job::2162fb33-6213-456d-93c1-213a64654e59 | mode sequential=False max_concurrent=20 dry_run=False ignore_delete=False ignore_remove=False write_method=PUT get_batch_number=100
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: output | job job::2162fb33-6213-456d-93c1-213a64654e59 | mode mode=postgres host=? port=? database=? schema=public pool_min=2 pool_max=10 ssl=False
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: dlq | job job::2162fb33-6213-456d-93c1-213a64654e59 | mode dead_letter_path= retention_s=86400 max_replay=10
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: retry | job job::2162fb33-6213-456d-93c1-213a64654e59 | mode max_retries=5 backoff_base=1s backoff_max=60s retry_on_status=[500, 502, 503, 504]
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: checkpoint | job job::2162fb33-6213-456d-93c1-213a64654e59 | mode enabled=True client_id=changes_worker every_n_docs=0
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: shutdown | job job::2162fb33-6213-456d-93c1-213a64654e59 | mode drain_timeout=60s dlq_inflight=False
+[INFO] [PROCESSING] job=..54e59 #s:..551b6a changes_worker: source type: sync_gateway
+[INFO] [CONTROL] changes_worker: thread monitor started
+[INFO] [CONTROL] changes_worker: PipelineManager ready with 1 jobs
+[INFO] [OUTPUT] job=..54e59 #s:..551b6a changes_worker: PostgreSQL pool created | op CONNECT | host host.docker.internal | port 5432
+[INFO] [MAPPING] job=..54e59 #s:..551b6a changes_worker: loaded schema mapping from CBL | doc_id orders.json | store cbl
+[INFO] [OUTPUT] job=..54e59 #s:..551b6a changes_worker: connection pool created | mode postgres
+[INFO] [OUTPUT] job=..54e59 #s:..551b6a changes_worker: database output ready (engine=postgres)
+[INFO] [CHECKPOINT] job=..54e59 #s:..551b6a changes_worker: checkpoint loaded | op SELECT | store sg
+[INFO] [DLQ] job=..54e59 #s:..551b6a changes_worker: no pending dead-letter entries to replay
+[INFO] [CHANGES] job=..54e59 #s:..551b6a changes_worker: replication config: feed=websocket, active_only=False, include_docs=False, since=2004869, initial_sync=False, initial_sync_done=True, optimize_initial_sync=False
+[INFO] [CHANGES] job=..54e59 #s:..551b6a changes_worker: feed mode: websocket (catch-up → ws stream)
+[INFO] [CHANGES] job=..54e59 #s:..551b6a changes_worker: catch-up starting (limit=10000, active_only=False, include_docs=False) | seq 2004869
 ```
 
-**`_debug.log`** — per-doc detail:
+**`_debug.log`** — startup + per-doc detail (real output):
 ```
-[DEBUG] [CHANGES] job=..54e59 #s:..f7ef55 #b:mddtmi changes_worker: change row | doc_id foo_0 | seq 670474
-[DEBUG] [HTTP] job=..54e59 #s:..f7ef55 #b:mddtmi changes_worker: fetch batch 1/1: 1 docs | batch 1
-[DEBUG] [OUTPUT] job=..54e59 #s:..f7ef55 #b:mddtmi changes_worker: executed SQL ops | op UPSERT | doc_id foo_0 | el_ms 8.5
-[DEBUG] [CHECKPOINT] job=..54e59 #s:..f7ef55 #b:mddtmi changes_worker: checkpoint saved | op UPDATE | store sg
+# ── Startup (CBL bootstrap, config, job loading) ────────────────────────────
+[DEBUG] asyncio: Using selector: EpollSelector
+[DEBUG] [CBL] changes_worker: config already in CBL — ignoring config.json | op SELECT | doc_type config
+[DEBUG] [CBL] changes_worker: config already migrated to v2.0 | op MIGRATE
+[DEBUG] [CBL] changes_worker: collection ready
+[DEBUG] [CBL] changes_worker: mapping loaded | op SELECT | doc_id mapping:orders.meta.json | doc_type mapping
+[DEBUG] [CBL] changes_worker: mapping loaded | op SELECT | doc_id mapping:orders.json | doc_type mapping
+[DEBUG] [CBL] changes_worker: listed mappings | op SELECT | doc_count 2 | doc_type mapping
+[DEBUG] [CBL] changes_worker: collection migration: already done
+[DEBUG] [CBL] changes_worker: listed 1 jobs | op SELECT | doc_type job | dur_ms 0.5
+[DEBUG] [CBL] changes_worker: mapping not found | op SELECT | doc_id mapping:2162fb33-...json | doc_type mapping
+[DEBUG] [CONTROL] changes_worker: registered job control endpoints
+[DEBUG] [CBL] changes_worker: job loaded | job 2162fb33-... | op SELECT | doc_id job::2162fb33-... | dur_ms 0.1
+
+# ── Per-batch processing detail ─────────────────────────────────────────────
+[DEBUG] [PROCESSING] job=..54e59 #s:..c6c6f0 #b:4bck5g changes_worker: batch complete: 1/1 succeeded, 0 failed
 ```
 
 **`_error.log`** — failures only:
@@ -928,6 +1009,8 @@ Mutating operations (POST/PUT/DELETE) log on **success** at `info` level:
 
 | Endpoint | Log Message | Fields |
 |----------|------------|--------|
+| `POST /api/wizard/test-source` | `test-source: begin / ok / got HTTP N / connect failed / timeout / unexpected error` | `http_method`, **`url` (full URL)**, `status`, `elapsed_ms`, `mode` (src type), `error_class`, `error_detail`, `doc_count` |
+| `POST /api/source/test` | `source/test: begin / reachable / unexpected HTTP N / connect failed / timeout / unexpected error` | `http_method`, **`url` (full URL)**, `status`, `elapsed_ms`, `error_class`, `error_detail` |
 | `POST /api/inputs_changes` | `inputs_changes saved via API` | `doc_count` |
 | `PUT /api/inputs_changes/{id}` | `input entry updated via API` | `doc_id` |
 | `DELETE /api/inputs_changes/{id}` | `input entry deleted via API` | `doc_id` |
@@ -946,7 +1029,46 @@ GET endpoints do not log (read-only, high frequency).
 
 All error paths log at `error` level with `error_detail=` containing the exception type and message.
 
-### Example Log Output
+### Example: Full Startup Sequence (real output)
+
+The complete startup sequence shows the pipeline stages flowing left-to-right (SOURCE → PROCESS → OUTPUT):
+
+```
+# ── Infrastructure ──────────────────────────────────────────────────────────
+[INFO] [CONTROL] changes_worker: PipelineManager starting
+[INFO] [CONTROL] changes_worker: loaded 1 enabled jobs
+[INFO] [CHANGES] changes_worker: job started | job job::2162fb33-6213-456d-93c1-213a64654e59
+
+# ── Session & Config Dump (CONTROL) ─────────────────────────────────────────
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: session started | job job::2162fb33-... | mode session=...551b6a
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: source | ... | mode source=sync_gateway ...
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: processing | ... | mode sequential=False max_concurrent=20 ...
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: output | ... | mode mode=postgres host=? port=? ...
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: dlq | ... | mode dead_letter_path= retention_s=86400 max_replay=10
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: retry | ... | mode max_retries=5 backoff_base=1s ...
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: checkpoint | ... | mode enabled=True client_id=changes_worker ...
+[INFO] [CONTROL] job=..54e59 #s:..551b6a changes_worker: job config: shutdown | ... | mode drain_timeout=60s dlq_inflight=False
+[INFO] [PROCESSING] job=..54e59 #s:..551b6a changes_worker: source type: sync_gateway
+[INFO] [CONTROL] changes_worker: thread monitor started
+[INFO] [CONTROL] changes_worker: PipelineManager ready with 1 jobs
+
+# ── Output Setup (RIGHT side) ───────────────────────────────────────────────
+[INFO] [OUTPUT] job=..54e59 #s:..551b6a changes_worker: PostgreSQL pool created | op CONNECT | host host.docker.internal | port 5432
+[INFO] [MAPPING] job=..54e59 #s:..551b6a changes_worker: loaded schema mapping from CBL | doc_id orders.json | store cbl
+[INFO] [OUTPUT] job=..54e59 #s:..551b6a changes_worker: connection pool created | mode postgres
+[INFO] [OUTPUT] job=..54e59 #s:..551b6a changes_worker: database output ready (engine=postgres)
+
+# ── Checkpoint & DLQ (recovery) ─────────────────────────────────────────────
+[INFO] [CHECKPOINT] job=..54e59 #s:..551b6a changes_worker: checkpoint loaded | op SELECT | store sg
+[INFO] [DLQ] job=..54e59 #s:..551b6a changes_worker: no pending dead-letter entries to replay
+
+# ── Source Feed (LEFT side) ─────────────────────────────────────────────────
+[INFO] [CHANGES] job=..54e59 #s:..551b6a changes_worker: replication config: feed=websocket, active_only=False, include_docs=False, since=2004869, initial_sync=False, initial_sync_done=True, optimize_initial_sync=False
+[INFO] [CHANGES] job=..54e59 #s:..551b6a changes_worker: feed mode: websocket (catch-up → ws stream)
+[INFO] [CHANGES] job=..54e59 #s:..551b6a changes_worker: catch-up starting (limit=10000, active_only=False, include_docs=False) | seq 2004869
+```
+
+### Example: Admin API Calls
 
 ```
 [INFO] [CONTROL] changes_worker: restart requested via /_restart endpoint
@@ -954,6 +1076,49 @@ All error paths log at `error` level with `error_detail=` containing the excepti
 [INFO] [CONTROL] changes_worker: stopping job | job job::2162fb33-6213-456d-93c1-213a64654e59
 [ERROR] [CONTROL] changes_worker: error starting job | job job::abc123 | err RuntimeError: job not found
 ```
+
+### Diagnosing Source-Test Failures from the GUI
+
+When the **Inputs** or **Jobs** page Test button reports a connection
+failure, the alert dialog shows the full URL that was tried, the HTTP
+status (when available), the error class (e.g. `ClientConnectorError`,
+`TimeoutError`), and a pointer to the Logs page. The same data is
+emitted as structured log lines so you can correlate the GUI alert with
+the audit trail:
+
+```
+# Operator clicks "Test" on an input pointing at the wrong port
+[INFO] [CONTROL] changes_worker: test-source: begin (auth=basic, src=sync_gateway) | method GET | url http://host.docker.internal:9999/db.us.prices/_changes | mode sync_gateway
+[ERROR] [HTTP]  changes_worker: test-source: connect failed (DNS/refused/SSL) | method GET | url http://host.docker.internal:9999/db.us.prices/_changes | el_ms 12.4 | mode sync_gateway | err_cls ClientConnectorError | err Cannot connect to host host.docker.internal:9999 ssl:default [Connection refused]
+
+# Auth fails (wrong password)
+[INFO] [CONTROL] changes_worker: test-source: begin (auth=basic, src=sync_gateway) | method GET | url http://host.docker.internal:4984/db.us.prices/_changes | mode sync_gateway
+[WARN] [HTTP]  changes_worker: test-source: got HTTP 401 | method GET | url http://...:4984/db.us.prices/_changes | status 401 | el_ms 18.1 | mode sync_gateway | err Unauthorized
+
+# Connected but the changes feed is empty
+[INFO] [CONTROL] changes_worker: test-source: begin (auth=basic, src=sync_gateway) | method GET | url http://...:4984/db.us.prices/_changes | mode sync_gateway
+[WARN] [CONTROL] changes_worker: test-source: connected but no docs in feed | method GET | url http://...:4984/db.us.prices/_changes | status 200 | el_ms 22.0 | mode sync_gateway
+
+# Happy path
+[INFO] [CONTROL] changes_worker: test-source: begin (auth=basic, src=sync_gateway) | method GET | url http://...:4984/db.us.prices/_changes | mode sync_gateway
+[INFO] [CONTROL] changes_worker: test-source: ok (100 docs sampled) | method GET | url http://...:4984/db.us.prices/_changes | status 200 | el_ms 38.2 | mode sync_gateway | doc_count 100
+```
+
+To diagnose a failed test from the Logs page (filter `[CONTROL]` and/or
+`[HTTP]`):
+
+```bash
+# Recent source-test attempts
+grep 'test-source:' logs/changes_worker_info.log | tail -20
+
+# Just the failures and their full URLs
+grep -E 'test-source: (got HTTP|connect failed|timeout|unexpected)' logs/changes_worker_*.log
+
+# All connect refused / DNS / SSL errors across all tests
+grep 'test-source: connect failed' logs/changes_worker_error.log
+```
+
+The exact `url` field on every line is the **full URL the worker dialed** — including keyspace (`db.scope.collection`) — so you can copy/paste it into `curl` to reproduce.
 
 ---
 

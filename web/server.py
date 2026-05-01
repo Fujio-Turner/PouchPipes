@@ -454,6 +454,10 @@ _PIPE_FIELD_KEYS = {
     "maint",
     "trigger",
     "session",
+    # Source mutation audit fields (attachment post-process PUT/DELETE)
+    "rev",
+    "new_rev",
+    "pp_action",
 }
 
 
@@ -1624,8 +1628,16 @@ async def get_sample_doc(request):
                 data = await resp.json()
                 results = data.get("results", [])
                 if not results:
+                    # Connection ok, feed empty. Surface as a warning
+                    # rather than an error so the GUI does not falsely
+                    # report a connection failure.
                     return json_response(
-                        {"error": "no_docs", "detail": "No documents in changes feed"}
+                        {
+                            "ok": True,
+                            "warning": "no_docs",
+                            "detail": "Connected, but the changes feed has no documents.",
+                            "pool_size": 0,
+                        }
                     )
                 pick = random.choice(results)
                 doc = pick.get("doc", pick)
@@ -2285,12 +2297,26 @@ def _auto_map(src_fields: list, table_defs: list) -> dict:
 
 
 async def wizard_test_source(request):
-    """Test connectivity to SG/App Services/Edge Server and return a random sample doc."""
+    """Test connectivity to SG/App Services/Edge Server and return a random sample doc.
+
+    Every test attempt is logged via the GUIDE_LOGGING.md ``[CONTROL]`` /
+    ``[HTTP]`` log keys with the **full URL**, auth method, status code,
+    elapsed time, and error class so operators can grep the Logs page to
+    diagnose failures.  The full URL is also echoed in every JSON response
+    so the GUI can display "we tried this exact URL" on success or failure.
+    """
     import random
+    import time as _time
 
     try:
         body = await request.json()
     except json.JSONDecodeError:
+        log_event(
+            logger,
+            "warn",
+            "CONTROL",
+            "test-source: invalid JSON body",
+        )
         return error_response("Invalid JSON")
 
     gw = body.get("gateway", {})
@@ -2302,6 +2328,13 @@ async def wizard_test_source(request):
     src = gw.get("src", "sync_gateway")
 
     if not url or not db:
+        log_event(
+            logger,
+            "warn",
+            "CONTROL",
+            "test-source: missing url or database",
+            mode=src,
+        )
         return error_response("URL and database are required")
 
     # All Couchbase sources use keyspace format: db.scope.collection
@@ -2313,6 +2346,17 @@ async def wizard_test_source(request):
         changes_url = f"{url}/{db}/_changes"
 
     params = {"limit": "100", "include_docs": "true", "since": "0"}
+    auth_method = auth_cfg.get("method", "none")
+
+    log_event(
+        logger,
+        "info",
+        "CONTROL",
+        "test-source: begin (auth=%s, src=%s)" % (auth_method, src),
+        http_method="GET",
+        url=changes_url,
+        mode=src,
+    )
 
     import aiohttp as _aiohttp
 
@@ -2325,17 +2369,17 @@ async def wizard_test_source(request):
         ssl_ctx.verify_mode = ssl.CERT_NONE
 
     headers = {}
-    method = auth_cfg.get("method", "none")
     basic_auth = None
-    if method == "basic" and auth_cfg.get("username"):
+    if auth_method == "basic" and auth_cfg.get("username"):
         basic_auth = _aiohttp.BasicAuth(
             auth_cfg["username"], auth_cfg.get("password", "")
         )
-    elif method == "bearer" and auth_cfg.get("bearer_token"):
+    elif auth_method == "bearer" and auth_cfg.get("bearer_token"):
         headers["Authorization"] = f"Bearer {auth_cfg['bearer_token']}"
-    elif method == "session" and auth_cfg.get("session_cookie"):
+    elif auth_method == "session" and auth_cfg.get("session_cookie"):
         headers["Cookie"] = f"SyncGatewaySession={auth_cfg['session_cookie']}"
 
+    t0 = _time.monotonic()
     try:
         connector = (
             _aiohttp.TCPConnector(ssl=ssl_ctx) if ssl_ctx else _aiohttp.TCPConnector()
@@ -2348,19 +2392,262 @@ async def wizard_test_source(request):
                 headers=headers,
                 timeout=_aiohttp.ClientTimeout(total=10),
             ) as resp:
-                data = await resp.json()
+                elapsed_ms = (_time.monotonic() - t0) * 1000.0
+                # Log the response — even a 4xx/5xx is "got something back"
+                if 400 <= resp.status < 600:
+                    body_preview = ""
+                    try:
+                        body_preview = (await resp.text())[:200]
+                    except Exception:
+                        pass
+                    log_event(
+                        logger,
+                        "warn",
+                        "HTTP",
+                        "test-source: got HTTP %d" % resp.status,
+                        http_method="GET",
+                        url=changes_url,
+                        status=resp.status,
+                        elapsed_ms=round(elapsed_ms, 1),
+                        mode=src,
+                        error_detail=body_preview,
+                    )
+                    return json_response(
+                        {
+                            "error": "http_%d" % resp.status,
+                            "detail": body_preview or ("HTTP %d" % resp.status),
+                            "url": changes_url,
+                            "status": resp.status,
+                            "auth_method": auth_method,
+                            "elapsed_ms": round(elapsed_ms, 1),
+                        },
+                        status=200,
+                    )
+                try:
+                    data = await resp.json()
+                except Exception as exc:
+                    log_event(
+                        logger,
+                        "error",
+                        "HTTP",
+                        "test-source: response was not JSON",
+                        http_method="GET",
+                        url=changes_url,
+                        status=resp.status,
+                        elapsed_ms=round(elapsed_ms, 1),
+                        mode=src,
+                        error_class=type(exc).__name__,
+                        error_detail=str(exc)[:200],
+                    )
+                    return json_response(
+                        {
+                            "error": "invalid_response",
+                            "detail": "Response was not JSON: %s" % exc,
+                            "url": changes_url,
+                            "status": resp.status,
+                            "auth_method": auth_method,
+                        },
+                        status=200,
+                    )
                 results = data.get("results", [])
                 if not results:
+                    log_event(
+                        logger,
+                        "warn",
+                        "CONTROL",
+                        "test-source: connected but no docs in feed",
+                        http_method="GET",
+                        url=changes_url,
+                        status=resp.status,
+                        elapsed_ms=round(elapsed_ms, 1),
+                        mode=src,
+                    )
+                    # Connection succeeded — the changes feed is just
+                    # empty. Treat as ok so the GUI does not show
+                    # "Connection failed" for what is really a healthy
+                    # but empty source.
                     return json_response(
-                        {"error": "no_docs", "detail": "No documents in changes feed"}
+                        {
+                            "ok": True,
+                            "warning": "no_docs",
+                            "detail": (
+                                "Connected successfully (HTTP %d) but the "
+                                "changes feed has no documents to sample."
+                            )
+                            % resp.status,
+                            "url": changes_url,
+                            "status": resp.status,
+                            "auth_method": auth_method,
+                            "elapsed_ms": round(elapsed_ms, 1),
+                            "pool_size": 0,
+                        }
                     )
                 pick = random.choice(results)
                 doc = pick.get("doc", pick)
-                return json_response(
-                    {"ok": True, "doc": doc, "pool_size": len(results)}
+                log_event(
+                    logger,
+                    "info",
+                    "CONTROL",
+                    "test-source: ok (%d docs sampled)" % len(results),
+                    http_method="GET",
+                    url=changes_url,
+                    status=resp.status,
+                    elapsed_ms=round(elapsed_ms, 1),
+                    mode=src,
+                    doc_count=len(results),
                 )
+                return json_response(
+                    {
+                        "ok": True,
+                        "doc": doc,
+                        "pool_size": len(results),
+                        "url": changes_url,
+                        "status": resp.status,
+                        "auth_method": auth_method,
+                        "elapsed_ms": round(elapsed_ms, 1),
+                    }
+                )
+    except _aiohttp.ClientConnectorError as exc:
+        elapsed_ms = (_time.monotonic() - t0) * 1000.0
+        # Auto-diagnose common scheme/cert misconfigurations so the
+        # operator doesn't have to read mbedTLS errors.
+        hint = None
+        s = str(exc).lower()
+        if "ssl" in s or "certificate" in s or "tls" in s:
+            if not gw.get("accept_self_signed_certs"):
+                hint = (
+                    "TLS/SSL handshake failed. If the source uses a "
+                    "self-signed certificate (e.g. local Couchbase Edge "
+                    "Server), enable 'Accept self-signed certs' on this "
+                    "input."
+                )
+            else:
+                hint = (
+                    "TLS handshake failed even with self-signed certs "
+                    "accepted. Check that the URL scheme matches the "
+                    "server (https vs http) and the port is correct."
+                )
+        elif changes_url.startswith("http://"):
+            hint = (
+                "Connection refused/dropped on http://. If the server "
+                "is HTTPS-only (Couchbase Edge Server defaults to TLS), "
+                "change the URL to https://."
+            )
+        log_event(
+            logger,
+            "error",
+            "HTTP",
+            "test-source: connect failed (DNS/refused/SSL)"
+            + (" — %s" % hint if hint else ""),
+            http_method="GET",
+            url=changes_url,
+            elapsed_ms=round(elapsed_ms, 1),
+            mode=src,
+            error_class=type(exc).__name__,
+            error_detail=str(exc)[:300],
+        )
+        return json_response(
+            {
+                "error": "connect_failed",
+                "detail": str(exc),
+                "hint": hint,
+                "url": changes_url,
+                "auth_method": auth_method,
+                "error_class": type(exc).__name__,
+                "elapsed_ms": round(elapsed_ms, 1),
+            },
+            status=200,
+        )
+    except _aiohttp.ClientError as exc:
+        # Catches ServerDisconnectedError, ClientPayloadError,
+        # ClientResponseError, etc.  This is what fires when you point
+        # http:// at an https-only port and the server resets/disconnects
+        # mid-stream (the symptom that used to fall through to
+        # "fetch_failed").
+        elapsed_ms = (_time.monotonic() - t0) * 1000.0
+        hint = None
+        if changes_url.startswith("http://"):
+            hint = (
+                "The server closed the connection. If the source is "
+                "HTTPS-only (e.g. Couchbase Edge Server with TLS), change "
+                "the URL scheme to https:// and enable 'Accept self-signed "
+                "certs' if using a self-signed cert."
+            )
+        log_event(
+            logger,
+            "error",
+            "HTTP",
+            "test-source: client error (%s)" % type(exc).__name__
+            + (" — %s" % hint if hint else ""),
+            http_method="GET",
+            url=changes_url,
+            elapsed_ms=round(elapsed_ms, 1),
+            mode=src,
+            error_class=type(exc).__name__,
+            error_detail=str(exc)[:300],
+        )
+        return json_response(
+            {
+                "error": "client_error",
+                "detail": str(exc) or type(exc).__name__,
+                "hint": hint,
+                "url": changes_url,
+                "auth_method": auth_method,
+                "error_class": type(exc).__name__,
+                "elapsed_ms": round(elapsed_ms, 1),
+            },
+            status=200,
+        )
+    except asyncio.TimeoutError as exc:
+        elapsed_ms = (_time.monotonic() - t0) * 1000.0
+        log_event(
+            logger,
+            "error",
+            "HTTP",
+            "test-source: timeout (10s)",
+            http_method="GET",
+            url=changes_url,
+            elapsed_ms=round(elapsed_ms, 1),
+            mode=src,
+            error_class=type(exc).__name__,
+            error_detail="Connection timed out after 10s",
+        )
+        return json_response(
+            {
+                "error": "timeout",
+                "detail": "Connection timed out after 10s",
+                "url": changes_url,
+                "auth_method": auth_method,
+                "error_class": "TimeoutError",
+                "elapsed_ms": round(elapsed_ms, 1),
+            },
+            status=200,
+        )
     except Exception as exc:
-        return json_response({"error": "fetch_failed", "detail": str(exc)}, status=500)
+        elapsed_ms = (_time.monotonic() - t0) * 1000.0
+        log_event(
+            logger,
+            "error",
+            "HTTP",
+            "test-source: unexpected error",
+            http_method="GET",
+            url=changes_url,
+            elapsed_ms=round(elapsed_ms, 1),
+            mode=src,
+            error_class=type(exc).__name__,
+            error_detail=str(exc)[:300],
+        )
+        return json_response(
+            {
+                "error": "fetch_failed",
+                "detail": str(exc),
+                "url": changes_url,
+                "auth_method": auth_method,
+                "error_class": type(exc).__name__,
+                "elapsed_ms": round(elapsed_ms, 1),
+            },
+            status=500,
+        )
 
 
 async def wizard_test_output(request):
@@ -2682,10 +2969,18 @@ async def clear_all_sources(request):
 
 
 async def test_source(request):
-    """Test connection to a Couchbase Sync Gateway."""
+    """Test connection to a Couchbase Sync Gateway.
+
+    Audit-logged via ``[CONTROL]`` / ``[HTTP]`` per GUIDE_LOGGING.md.
+    Every JSON response carries the full ``url`` that was tried so the
+    GUI can show the operator exactly which endpoint we hit.
+    """
+    import time as _time
+
     try:
         body = await request.json()
     except json.JSONDecodeError:
+        log_event(logger, "warn", "CONTROL", "source/test: invalid JSON body")
         return error_response("Invalid JSON")
 
     url = body.get("url", "").strip()
@@ -2695,41 +2990,52 @@ async def test_source(request):
     auth_method = body.get("auth_method", "none").strip()
 
     if not url or not database:
+        log_event(
+            logger,
+            "warn",
+            "CONTROL",
+            "source/test: missing url or database",
+        )
         return error_response("url and database are required")
 
+    # Construct the changes endpoint URL
+    # Sync Gateway uses keyspace format: db.scope.collection
+    if scope and scope != "_default" and collection and collection != "_default":
+        test_url = f"{url}/{database}.{scope}.{collection}/_changes"
+    elif collection and collection != "_default":
+        test_url = f"{url}/{database}.{collection}/_changes"
+    else:
+        test_url = f"{url}/{database}/_changes"
+
+    log_event(
+        logger,
+        "info",
+        "CONTROL",
+        "source/test: begin (auth=%s)" % auth_method,
+        http_method="GET",
+        url=test_url,
+    )
+
+    headers = {}
+    if auth_method == "basic":
+        username = body.get("username", "").strip()
+        password = body.get("password", "").strip()
+        if username and password:
+            import base64
+
+            credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
+            headers["Authorization"] = f"Basic {credentials}"
+    elif auth_method == "session":
+        session_cookie = body.get("session_cookie", "").strip()
+        if session_cookie:
+            headers["Cookie"] = f"SyncGatewaySession={session_cookie}"
+    elif auth_method == "bearer":
+        bearer_token = body.get("bearer_token", "").strip()
+        if bearer_token:
+            headers["Authorization"] = f"Bearer {bearer_token}"
+
+    t0 = _time.monotonic()
     try:
-        # Try a simple GET to the database endpoint
-        headers = {}
-        auth = None
-
-        if auth_method == "basic":
-            username = body.get("username", "").strip()
-            password = body.get("password", "").strip()
-            if username and password:
-                import base64
-
-                credentials = base64.b64encode(
-                    f"{username}:{password}".encode()
-                ).decode()
-                headers["Authorization"] = f"Basic {credentials}"
-        elif auth_method == "session":
-            session_cookie = body.get("session_cookie", "").strip()
-            if session_cookie:
-                headers["Cookie"] = f"SyncGatewaySession={session_cookie}"
-        elif auth_method == "bearer":
-            bearer_token = body.get("bearer_token", "").strip()
-            if bearer_token:
-                headers["Authorization"] = f"Bearer {bearer_token}"
-
-        # Construct the changes endpoint URL
-        # Sync Gateway uses keyspace format: db.scope.collection
-        if scope and scope != "_default" and collection and collection != "_default":
-            test_url = f"{url}/{database}.{scope}.{collection}/_changes"
-        elif collection and collection != "_default":
-            test_url = f"{url}/{database}.{collection}/_changes"
-        else:
-            test_url = f"{url}/{database}/_changes"
-
         # Make a request to test connection
         async with _aiohttp.ClientSession() as session:
             async with session.get(
@@ -2738,15 +3044,121 @@ async def test_source(request):
                 timeout=_aiohttp.ClientTimeout(total=10),
                 ssl=False,
             ) as resp:
+                elapsed_ms = (_time.monotonic() - t0) * 1000.0
                 if resp.status in [200, 400, 401, 403]:
-                    # Got a response, connection works
-                    return json_response({"ok": True, "status": resp.status})
-                else:
-                    return json_response(
-                        {"ok": False, "error": f"HTTP {resp.status}"}, status=200
+                    log_event(
+                        logger,
+                        "info",
+                        "CONTROL",
+                        "source/test: reachable (HTTP %d)" % resp.status,
+                        http_method="GET",
+                        url=test_url,
+                        status=resp.status,
+                        elapsed_ms=round(elapsed_ms, 1),
                     )
+                    return json_response(
+                        {
+                            "ok": True,
+                            "status": resp.status,
+                            "url": test_url,
+                            "auth_method": auth_method,
+                            "elapsed_ms": round(elapsed_ms, 1),
+                        }
+                    )
+                else:
+                    log_event(
+                        logger,
+                        "warn",
+                        "HTTP",
+                        "source/test: unexpected HTTP %d" % resp.status,
+                        http_method="GET",
+                        url=test_url,
+                        status=resp.status,
+                        elapsed_ms=round(elapsed_ms, 1),
+                    )
+                    return json_response(
+                        {
+                            "ok": False,
+                            "error": f"HTTP {resp.status}",
+                            "url": test_url,
+                            "status": resp.status,
+                            "auth_method": auth_method,
+                            "elapsed_ms": round(elapsed_ms, 1),
+                        },
+                        status=200,
+                    )
+    except _aiohttp.ClientConnectorError as exc:
+        elapsed_ms = (_time.monotonic() - t0) * 1000.0
+        log_event(
+            logger,
+            "error",
+            "HTTP",
+            "source/test: connect failed (DNS/refused/SSL)",
+            http_method="GET",
+            url=test_url,
+            elapsed_ms=round(elapsed_ms, 1),
+            error_class=type(exc).__name__,
+            error_detail=str(exc)[:300],
+        )
+        return json_response(
+            {
+                "ok": False,
+                "error": str(exc),
+                "url": test_url,
+                "auth_method": auth_method,
+                "error_class": type(exc).__name__,
+                "elapsed_ms": round(elapsed_ms, 1),
+            },
+            status=200,
+        )
+    except asyncio.TimeoutError as exc:
+        elapsed_ms = (_time.monotonic() - t0) * 1000.0
+        log_event(
+            logger,
+            "error",
+            "HTTP",
+            "source/test: timeout (10s)",
+            http_method="GET",
+            url=test_url,
+            elapsed_ms=round(elapsed_ms, 1),
+            error_class=type(exc).__name__,
+            error_detail="Connection timed out after 10s",
+        )
+        return json_response(
+            {
+                "ok": False,
+                "error": "Connection timed out after 10s",
+                "url": test_url,
+                "auth_method": auth_method,
+                "error_class": "TimeoutError",
+                "elapsed_ms": round(elapsed_ms, 1),
+            },
+            status=200,
+        )
     except Exception as exc:
-        return json_response({"ok": False, "error": str(exc)}, status=200)
+        elapsed_ms = (_time.monotonic() - t0) * 1000.0
+        log_event(
+            logger,
+            "error",
+            "HTTP",
+            "source/test: unexpected error",
+            http_method="GET",
+            url=test_url,
+            elapsed_ms=round(elapsed_ms, 1),
+            error_class=type(exc).__name__,
+            error_detail=str(exc)[:300],
+        )
+        return json_response(
+            {
+                "ok": False,
+                "error": str(exc),
+                "url": test_url,
+                "auth_method": auth_method,
+                "error_class": type(exc).__name__,
+                "elapsed_ms": round(elapsed_ms, 1),
+            },
+            status=200,
+        )
 
 
 # --- App factory ---

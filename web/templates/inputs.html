@@ -80,7 +80,7 @@
             <div class="grid grid-cols-2 gap-4 mb-3">
               <div>
                 <label class="label label-text text-xs font-semibold">Source Type</label>
-                <select id="inputSourceType" class="select select-bordered select-sm w-full" required>
+                <select id="inputSourceType" class="select select-bordered select-sm w-full" required onchange="updateComputedUrl()">
                   <option value="sync_gateway">Sync Gateway</option>
                   <option value="app_services">App Services</option>
                   <option value="edge_server">Edge Server</option>
@@ -89,23 +89,43 @@
               </div>
               <div>
                 <label class="label label-text text-xs font-semibold">Host</label>
-                <input id="inputHost" type="url" class="input input-bordered input-sm w-full" placeholder="http://localhost:4984" required />
+                <input id="inputHost" type="url" class="input input-bordered input-sm w-full"
+                       placeholder="http://localhost:4984 (or https://localhost:59840 for Edge Server)"
+                       required oninput="updateComputedUrl()" />
               </div>
             </div>
 
             <!-- Row 3: Database + Scope + Collection -->
-            <div class="grid grid-cols-3 gap-4 mb-3">
+            <div id="inputKeyspaceRow" class="grid grid-cols-3 gap-4 mb-3">
               <div>
-                <label class="label label-text text-xs font-semibold">Database</label>
-                <input id="inputDatabase" type="text" class="input input-bordered input-sm w-full" required />
+                <label class="label label-text text-xs font-semibold">
+                  Database
+                  <span class="text-xs opacity-60 ml-1" title="You can also paste a full keyspace like 'db.us.prices' here — it will auto-split into Database / Scope / Collection.">ⓘ</span>
+                </label>
+                <input id="inputDatabase" type="text" class="input input-bordered input-sm w-full"
+                       placeholder="e.g. db (or paste db.us.prices)" required
+                       oninput="onDatabaseInput(); updateComputedUrl();" />
               </div>
-              <div>
+              <div id="inputScopeWrap">
                 <label class="label label-text text-xs font-semibold">Scope</label>
-                <input id="inputScope" type="text" class="input input-bordered input-sm w-full" placeholder="_default" />
+                <input id="inputScope" type="text" class="input input-bordered input-sm w-full"
+                       placeholder="_default" oninput="updateComputedUrl()" />
               </div>
-              <div>
+              <div id="inputCollectionWrap">
                 <label class="label label-text text-xs font-semibold">Collection</label>
-                <input id="inputCollection" type="text" class="input input-bordered input-sm w-full" placeholder="_default" />
+                <input id="inputCollection" type="text" class="input input-bordered input-sm w-full"
+                       placeholder="_default" oninput="updateComputedUrl()" />
+              </div>
+            </div>
+
+            <!-- Live URL preview -->
+            <div class="mb-3">
+              <label class="label label-text text-xs font-semibold">Computed URL (this is what Test will hit)</label>
+              <div id="inputComputedUrl" class="text-xs font-mono p-2 bg-base-200 rounded break-all opacity-80">—</div>
+              <div id="inputUrlHelp" class="text-xs opacity-60 mt-1">
+                <strong>Couchbase products</strong> (Sync Gateway / App Services / Edge Server) use the keyspace format
+                <code>/{database}.{scope}.{collection}</code>.
+                <strong>CouchDB</strong> uses just <code>/{database}</code> (no scope/collection).
               </div>
             </div>
 
@@ -150,7 +170,7 @@
             <div class="grid grid-cols-2 gap-4 mb-3">
               <label class="label cursor-pointer gap-2">
                 <span class="label-text text-xs font-semibold">Accept Self-Signed Certs</span>
-                <input id="inputSelfSignedCerts" type="checkbox" class="checkbox checkbox-sm" />
+                <input id="inputSelfSignedCerts" type="checkbox" class="checkbox checkbox-sm" onchange="updateComputedUrl()" />
               </label>
               <label class="label cursor-pointer gap-2">
                 <span class="label-text text-xs font-semibold">Compress</span>
@@ -176,6 +196,7 @@
   <div id="toastContainer" class="toast toast-end toast-bottom z-50"></div>
 
   <script src="/static/js/sidebar.js"></script>
+  <script src="/static/js/source-test.js"></script>
   <script>
     var allInputs = [];
     var allJobs = [];
@@ -190,7 +211,9 @@
 
     function showToast(message, type) {
       var container = document.getElementById('toastContainer');
-      var alertClass = type === 'success' ? 'alert-success' : 'alert-error';
+      var alertClass = type === 'success' ? 'alert-success'
+        : type === 'warning' ? 'alert-warning'
+        : 'alert-error';
       var toast = document.createElement('div');
       toast.className = 'alert ' + alertClass;
       toast.innerHTML = '<span>' + message + '</span>';
@@ -199,6 +222,88 @@
     }
 
     // ===== Toggle Auth Fields =====
+    // Auto-split full keyspace pasted into Database field.
+    // Accepts "db", "db.scope", or "db.scope.collection" — fills the
+    // Scope/Collection inputs accordingly so the Test/Save build the
+    // right URL.
+    function onDatabaseInput() {
+      var dbEl = document.getElementById('inputDatabase');
+      var v = dbEl.value;
+      if (!v || v.indexOf('.') === -1) return;
+      var parts = v.split('.');
+      if (parts.length >= 3) {
+        dbEl.value = parts[0];
+        document.getElementById('inputScope').value = parts[1];
+        document.getElementById('inputCollection').value = parts.slice(2).join('.');
+      } else if (parts.length === 2) {
+        dbEl.value = parts[0];
+        // Convention: "db.collection" with default scope (Couchbase 7+ keyspace shortcut)
+        document.getElementById('inputCollection').value = parts[1];
+      }
+    }
+
+    // Live preview of the URL the worker will dial when you click Test.
+    // Mirrors web/server.py wizard_test_source URL construction so
+    // operators can see the FULL URL before testing — especially useful
+    // for Couchbase Edge Server where the keyspace is db.scope.collection.
+    function updateComputedUrl() {
+      var host = (document.getElementById('inputHost').value || '').trim().replace(/\/+$/, '');
+      var db = (document.getElementById('inputDatabase').value || '').trim();
+      var scope = (document.getElementById('inputScope').value || '').trim();
+      var coll = (document.getElementById('inputCollection').value || '').trim();
+      var srcType = document.getElementById('inputSourceType').value;
+      var out = document.getElementById('inputComputedUrl');
+      var helpEl = document.getElementById('inputUrlHelp');
+      var scopeWrap = document.getElementById('inputScopeWrap');
+      var collWrap = document.getElementById('inputCollectionWrap');
+      var isCouchDb = (srcType === 'couchdb');
+
+      // CouchDB has no scope/collection — hide those inputs and tailor help text.
+      // Couchbase products (Sync Gateway / App Services / Edge Server) keep them.
+      scopeWrap.classList.toggle('hidden', isCouchDb);
+      collWrap.classList.toggle('hidden', isCouchDb);
+      if (isCouchDb) {
+        helpEl.innerHTML =
+          '<strong>CouchDB</strong> uses simple <code>/{database}</code> — no scope/collection. ' +
+          'Switch source type to Sync Gateway / App Services / Edge Server to use Couchbase keyspace format.';
+      } else {
+        helpEl.innerHTML =
+          '<strong>Couchbase products</strong> (Sync Gateway / App Services / Edge Server) use the keyspace format ' +
+          '<code>/{database}.{scope}.{collection}</code>. ' +
+          'Leave Scope/Collection blank or set to <code>_default</code> if your bucket has no custom keyspace.';
+      }
+
+      if (!host || !db) {
+        out.textContent = 'Fill Host + Database to see the URL…';
+        out.classList.add('opacity-50');
+        return;
+      }
+      out.classList.remove('opacity-50');
+      var keyspace;
+      if (isCouchDb) {
+        // CouchDB: simply /db
+        keyspace = db;
+      } else if (scope && scope !== '_default' && coll && coll !== '_default') {
+        // Couchbase: /db.scope.collection
+        keyspace = db + '.' + scope + '.' + coll;
+      } else if (coll && coll !== '_default') {
+        // Shortcut: /db.collection (default scope)
+        keyspace = db + '.' + coll;
+      } else {
+        // Couchbase fallback: /db (default scope + default collection)
+        keyspace = db;
+      }
+      var url = host + '/' + keyspace + '/_changes';
+      var warn = '';
+      if (host.indexOf('https://') !== 0 && /:(59|44|443|865)\d*/.test(host)) {
+        warn = ' ⚠️ HTTPS port with http:// scheme?';
+      }
+      if (host.indexOf('https://') === 0 && !document.getElementById('inputSelfSignedCerts').checked) {
+        warn += ' ⚠️ HTTPS without "Accept Self-Signed Certs" — Edge Server needs this enabled.';
+      }
+      out.textContent = url + warn;
+    }
+
     function toggleAuthFields() {
       var method = document.getElementById('inputAuthMethod').value;
       document.getElementById('authUsernameWrap').classList.toggle('hidden', method !== 'basic');
@@ -344,6 +449,8 @@
         document.getElementById('inputFormTitle').textContent = 'New Input';
       }
 
+      // Compute and show the URL preview now that fields are populated
+      updateComputedUrl();
       container.scrollIntoView({ behavior: 'smooth' });
     }
 
@@ -451,72 +558,29 @@
     }
 
     // ===== Test Connection =====
+    // Both handlers below delegate to the shared SourceTest helper in
+    // /static/js/source-test.js so the API contract (ok / warning="no_docs"
+    // / error) is interpreted identically here, in jobs.html, and in any
+    // future page that calls /api/wizard/test-source.
     function testInputConnection() {
       var entry = buildInputEntry();
-      var payload = {
-        gateway: {
-          url: entry.host,
-          database: entry.database,
-          scope: entry.scope,
-          collection: entry.collection,
-          src: entry.source_type,
-          accept_self_signed_certs: entry.accept_self_signed_certs,
-          compress: entry.compress
-        },
-        auth: entry.auth
-      };
-
-      document.getElementById('inputFormStatus').textContent = 'Testing…';
-
-      fetch('/api/wizard/test-source', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      })
-      .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
-      .then(function(res) {
-        if (res.ok && res.data.success) {
-          showToast('✓ Connection successful!', 'success');
-        } else {
-          alert('Connection failed: ' + (res.data.error || res.data.message || 'Unknown error'));
-        }
-      })
-      .catch(function(err) { alert('Test failed: ' + err.message); })
-      .finally(function() { document.getElementById('inputFormStatus').textContent = ''; });
+      var payload = SourceTest.buildPayloadFromInput(entry);
+      var statusEl = document.getElementById('inputFormStatus');
+      SourceTest.test({
+        payload: payload,
+        onStart: function() { statusEl.textContent = 'Testing…'; },
+        onDone:  function() { statusEl.textContent = ''; }
+      });
     }
 
     // ===== Test from table row =====
     function testInputConnectionById(inputId) {
       var inp = allInputs.find(function(i) { return i.id === inputId; });
       if (!inp) { alert('Input not found'); return; }
-
-      var payload = {
-        gateway: {
-          url: inp.host,
-          database: inp.database,
-          scope: inp.scope || '_default',
-          collection: inp.collection || '_default',
-          src: inp.source_type,
-          accept_self_signed_certs: !!inp.accept_self_signed_certs,
-          compress: !!inp.compress
-        },
-        auth: inp.auth || { method: 'none' }
-      };
-
-      fetch('/api/wizard/test-source', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      })
-      .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
-      .then(function(res) {
-        if (res.ok && res.data.success) {
-          showToast('✓ ' + inputId + ': Connection OK', 'success');
-        } else {
-          showToast('✗ ' + inputId + ': ' + (res.data.error || res.data.message || 'Failed'), 'error');
-        }
-      })
-      .catch(function(err) { showToast('✗ Test error: ' + err.message, 'error'); });
+      SourceTest.test({
+        payload: SourceTest.buildPayloadFromInput(inp),
+        label: inputId
+      });
     }
 
     // ===== Delete Input =====

@@ -842,9 +842,9 @@ async def fetch_db_update_seq(
                     logger,
                     "debug",
                     "CHANGES",
-                    "extracted update_seq from Edge Server collections",
+                    "extracted update_seq from Edge Server collections (%d)"
+                    % len(collections),
                     url=url,
-                    collection_count=len(collections),
                 )
         if raw_seq is None:
             log_event(
@@ -862,7 +862,6 @@ async def fetch_db_update_seq(
             "CHANGES",
             "fetched database update_seq=%d as initial sync target" % seq_int,
             url=url,
-            update_seq=seq_int,
         )
         return seq_int
     except Exception as exc:
@@ -2046,7 +2045,7 @@ async def _consume_continuous_stream(
     # Use an open-ended HTTP timeout for the streaming connection
     continuous_timeout = aiohttp.ClientTimeout(total=None, sock_read=None)
 
-    log_event(logger, "info", "CHANGES", "continuous stream: connecting", since=since)
+    log_event(logger, "info", "CHANGES", "continuous stream: connecting", seq=since)
     ic(changes_url, body_payload, since, "continuous stream")
 
     failure_count = 0
@@ -2354,7 +2353,7 @@ async def _consume_websocket_stream(
             credentials.encode("utf-8")
         ).decode("utf-8")
 
-    log_event(logger, "info", "CHANGES", "websocket stream: connecting", since=since)
+    log_event(logger, "info", "CHANGES", "websocket stream: connecting", seq=since)
     ic(ws_url, payload, since, "websocket stream")
 
     failure_count = 0
@@ -2489,8 +2488,7 @@ async def _consume_websocket_stream(
                         logger,
                         "warn",
                         "CHANGES",
-                        "websocket: unparseable message",
-                        message_length=len(msg.data),
+                        "websocket: unparseable message (%d bytes)" % len(msg.data),
                     )
                     if metrics:
                         metrics.inc("stream_parse_errors_total")
@@ -2518,8 +2516,8 @@ async def _consume_websocket_stream(
                         logger,
                         "warn",
                         "CHANGES",
-                        "websocket idle timeout – reconnecting",
-                        timeout_s=ws_idle_timeout,
+                        "websocket idle timeout (%.0fs) – reconnecting"
+                        % ws_idle_timeout,
                         attempt=failure_count,
                     )
                     if metrics:
@@ -2756,11 +2754,10 @@ async def _replay_dead_letter_queue(
                 logger,
                 "warn",
                 "DLQ",
-                "DLQ entry target_url differs from current config",
+                "DLQ entry target_url differs from current config (entry=%s current=%s)"
+                % (entry_target, current_target_url),
                 doc_id=doc_id,
                 dlq_id=dlq_id,
-                entry_target=entry_target,
-                current_target=current_target_url,
             )
 
         # Get the full doc data
@@ -2779,12 +2776,12 @@ async def _replay_dead_letter_queue(
         doc = full_entry.get("doc_data", {})
         log_event(
             logger,
-            "info",
+            "debug",
             "DLQ",
             "replaying DLQ entry",
             doc_id=doc_id,
             dlq_id=dlq_id,
-            method=method,
+            http_method=method,
             replay_attempt=replay_attempts + 1,
         )
 
@@ -2795,7 +2792,7 @@ async def _replay_dead_letter_queue(
                 succeeded += 1
                 log_event(
                     logger,
-                    "info",
+                    "debug",
                     "DLQ",
                     "DLQ entry replayed successfully – purged",
                     doc_id=doc_id,

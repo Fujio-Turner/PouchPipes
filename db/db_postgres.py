@@ -134,12 +134,11 @@ class PostgresOutputForwarder(BaseOutputForwarder):
             logger,
             "info",
             "OUTPUT",
-            "PostgreSQL pool created",
+            "PostgreSQL pool created (sync_commit=%s, prepared_stmts=%s)"
+            % (self._sync_commit, self._prepared_statements),
             host=self._host,
             port=self._port,
             operation="CONNECT",
-            sync_commit=self._sync_commit,
-            prepared_statements=self._prepared_statements,
         )
 
     async def _close_pool(self) -> None:

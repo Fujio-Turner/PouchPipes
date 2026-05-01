@@ -1356,13 +1356,10 @@ class CBLStore:
                 logger,
                 "debug",
                 "DLQ",
-                "listed page",
+                "listed page (offset=%d limit=%d filtered=%d total=%d)"
+                % (offset, limit, filtered_count, total_count),
                 operation="SELECT",
                 doc_type="dlq",
-                offset=offset,
-                limit=limit,
-                filtered=filtered_count,
-                total=total_count,
             )
             return {
                 "entries": entries,
@@ -1375,11 +1372,11 @@ class CBLStore:
                 logger,
                 "error",
                 "DLQ",
-                "failed to list DLQ page: %s" % err_msg,
+                "failed to list DLQ page (offset=%d limit=%d): %s"
+                % (offset, limit, err_msg),
                 operation="SELECT",
                 doc_type="dlq",
-                offset=offset,
-                limit=limit,
+                error_detail=err_msg,
             )
             # Fall back to unpaginated list_dlq
             try:
@@ -1597,7 +1594,7 @@ class CBLStore:
 
         log_event(
             logger,
-            "info",
+            "debug",
             "DLQ",
             "entry purged",
             operation="DELETE",

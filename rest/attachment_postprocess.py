@@ -16,6 +16,7 @@ Supported actions:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -144,7 +145,14 @@ class AttachmentPostProcessor:
 
         for attempt in range(1, self._pp.max_conflict_retries + 1):
             ok, new_rev = await self._put_doc(
-                doc_id, rev, body, base_url, http, auth, headers
+                doc_id,
+                rev,
+                body,
+                base_url,
+                http,
+                auth,
+                headers,
+                pp_action="update_doc",
             )
             if ok:
                 body["_rev"] = new_rev
@@ -153,7 +161,11 @@ class AttachmentPostProcessor:
                     "info",
                     "ATTACHMENT",
                     "post-process update_doc succeeded",
+                    pp_action="update_doc",
                     doc_id=doc_id,
+                    doc_rev=rev,
+                    new_rev=new_rev,
+                    attempt=attempt,
                 )
                 return body
 
@@ -201,7 +213,14 @@ class AttachmentPostProcessor:
 
         for attempt in range(1, self._pp.max_conflict_retries + 1):
             ok, new_rev = await self._put_doc(
-                doc_id, rev, body, base_url, http, auth, headers
+                doc_id,
+                rev,
+                body,
+                base_url,
+                http,
+                auth,
+                headers,
+                pp_action="set_ttl",
             )
             if ok:
                 body["_rev"] = new_rev
@@ -210,7 +229,11 @@ class AttachmentPostProcessor:
                     "info",
                     "ATTACHMENT",
                     "post-process set_ttl succeeded (_exp=%d)" % body["_exp"],
+                    pp_action="set_ttl",
                     doc_id=doc_id,
+                    doc_rev=rev,
+                    new_rev=new_rev,
+                    attempt=attempt,
                 )
                 return body
 
@@ -256,23 +279,81 @@ class AttachmentPostProcessor:
                 quote(doc_id, safe=""),
                 quote(rev, safe=""),
             )
+            log_event(
+                logger,
+                "debug",
+                "ATTACHMENT",
+                "source DELETE begin",
+                pp_action="delete_doc",
+                doc_id=doc_id,
+                doc_rev=rev,
+                http_method="DELETE",
+                url=url,
+                attempt=attempt,
+            )
+            t0 = time.monotonic()
             try:
                 resp = await http.request("DELETE", url, auth=auth, headers=headers)
+                # Try to read response body to capture the new (tombstone) rev
+                new_rev = rev
+                try:
+                    resp_body = await resp.json()
+                    new_rev = resp_body.get("rev", rev)
+                except Exception:
+                    pass
                 resp.release()
+                elapsed_ms = (time.monotonic() - t0) * 1000.0
+                # Receipt: log the new tombstone _rev as proof of deletion
                 log_event(
                     logger,
                     "info",
                     "ATTACHMENT",
-                    "post-process delete_doc succeeded",
+                    "source DELETE ok (receipt) — post-process delete_doc succeeded",
+                    pp_action="delete_doc",
                     doc_id=doc_id,
+                    doc_rev=rev,
+                    new_rev=new_rev,
+                    http_method="DELETE",
+                    status=200,
+                    elapsed_ms=round(elapsed_ms, 1),
+                    attempt=attempt,
                 )
+                doc["_rev"] = new_rev
                 return doc
             except ClientHTTPError as exc:
+                elapsed_ms = (time.monotonic() - t0) * 1000.0
                 if exc.status == 404:
+                    log_event(
+                        logger,
+                        "warn",
+                        "ATTACHMENT",
+                        "source DELETE 404 not_found (doc missing)",
+                        pp_action="delete_doc",
+                        doc_id=doc_id,
+                        doc_rev=rev,
+                        http_method="DELETE",
+                        status=404,
+                        elapsed_ms=round(elapsed_ms, 1),
+                        attempt=attempt,
+                        error_detail=str(exc)[:200],
+                    )
                     self._handle_missing_doc(doc_id, "delete_doc")
                     return doc
                 if exc.status == 409:
                     self._inc("attachments_conflict_retries_total")
+                    log_event(
+                        logger,
+                        "warn",
+                        "ATTACHMENT",
+                        "source DELETE 409 conflict (doc changed)",
+                        pp_action="delete_doc",
+                        doc_id=doc_id,
+                        doc_rev=rev,
+                        http_method="DELETE",
+                        status=409,
+                        elapsed_ms=round(elapsed_ms, 1),
+                        attempt=attempt,
+                    )
                     refreshed, fresh_rev = await self._handle_conflict(
                         doc_id, {}, base_url, http, auth, headers
                     )
@@ -280,6 +361,54 @@ class AttachmentPostProcessor:
                         return doc
                     rev = fresh_rev
                     continue
+                if exc.status in (401, 403):
+                    log_event(
+                        logger,
+                        "error",
+                        "ATTACHMENT",
+                        "source DELETE unauthorized",
+                        pp_action="delete_doc",
+                        doc_id=doc_id,
+                        doc_rev=rev,
+                        http_method="DELETE",
+                        status=exc.status,
+                        elapsed_ms=round(elapsed_ms, 1),
+                        attempt=attempt,
+                        error_detail=str(exc)[:200],
+                    )
+                    raise
+                log_event(
+                    logger,
+                    "error",
+                    "ATTACHMENT",
+                    "source DELETE http error",
+                    pp_action="delete_doc",
+                    doc_id=doc_id,
+                    doc_rev=rev,
+                    http_method="DELETE",
+                    status=exc.status,
+                    elapsed_ms=round(elapsed_ms, 1),
+                    attempt=attempt,
+                    error_class=type(exc).__name__,
+                    error_detail=str(exc)[:200],
+                )
+                raise
+            except (asyncio.TimeoutError, ConnectionError) as exc:
+                elapsed_ms = (time.monotonic() - t0) * 1000.0
+                log_event(
+                    logger,
+                    "error",
+                    "ATTACHMENT",
+                    "source DELETE timeout/connection error",
+                    pp_action="delete_doc",
+                    doc_id=doc_id,
+                    doc_rev=rev,
+                    http_method="DELETE",
+                    elapsed_ms=round(elapsed_ms, 1),
+                    attempt=attempt,
+                    error_class=type(exc).__name__,
+                    error_detail=str(exc)[:200],
+                )
                 raise
 
         self._inc("attachments_post_process_errors_total")
@@ -288,7 +417,9 @@ class AttachmentPostProcessor:
             "warn",
             "ATTACHMENT",
             "post-process delete_doc exhausted conflict retries",
+            pp_action="delete_doc",
             doc_id=doc_id,
+            doc_rev=rev,
         )
         return doc
 
@@ -308,6 +439,7 @@ class AttachmentPostProcessor:
 
         for name in uploaded:
             deleted = False
+            prev_rev = current_rev
             for attempt in range(1, self._pp.max_conflict_retries + 1):
                 url = "%s/%s/%s?rev=%s" % (
                     base_url.rstrip("/"),
@@ -315,26 +447,76 @@ class AttachmentPostProcessor:
                     quote(name, safe=""),
                     quote(current_rev, safe=""),
                 )
+                log_event(
+                    logger,
+                    "debug",
+                    "ATTACHMENT",
+                    "source DELETE attachment begin: %s" % name,
+                    pp_action="delete_attachments",
+                    doc_id=doc_id,
+                    doc_rev=current_rev,
+                    http_method="DELETE",
+                    url=url,
+                    attempt=attempt,
+                )
+                t0 = time.monotonic()
                 try:
                     resp = await http.request("DELETE", url, auth=auth, headers=headers)
                     resp_body = await resp.json()
-                    current_rev = resp_body.get("rev", current_rev)
+                    new_rev = resp_body.get("rev", current_rev)
                     resp.release()
+                    elapsed_ms = (time.monotonic() - t0) * 1000.0
+                    # Receipt: log the new _rev returned after attachment removal
+                    log_event(
+                        logger,
+                        "info",
+                        "ATTACHMENT",
+                        "source DELETE attachment ok (receipt): %s" % name,
+                        pp_action="delete_attachments",
+                        doc_id=doc_id,
+                        doc_rev=prev_rev,
+                        new_rev=new_rev,
+                        http_method="DELETE",
+                        status=200,
+                        elapsed_ms=round(elapsed_ms, 1),
+                        attempt=attempt,
+                    )
+                    current_rev = new_rev
                     deleted = True
                     break
                 except ClientHTTPError as exc:
+                    elapsed_ms = (time.monotonic() - t0) * 1000.0
                     if exc.status == 404:
                         log_event(
                             logger,
                             "debug",
                             "ATTACHMENT",
                             "attachment already missing: %s" % name,
+                            pp_action="delete_attachments",
                             doc_id=doc_id,
+                            doc_rev=current_rev,
+                            http_method="DELETE",
+                            status=404,
+                            elapsed_ms=round(elapsed_ms, 1),
+                            attempt=attempt,
                         )
                         deleted = True
                         break
                     if exc.status == 409:
                         self._inc("attachments_conflict_retries_total")
+                        log_event(
+                            logger,
+                            "warn",
+                            "ATTACHMENT",
+                            "source DELETE attachment 409 conflict: %s" % name,
+                            pp_action="delete_attachments",
+                            doc_id=doc_id,
+                            doc_rev=current_rev,
+                            http_method="DELETE",
+                            status=409,
+                            elapsed_ms=round(elapsed_ms, 1),
+                            attempt=attempt,
+                        )
                         refreshed, fresh_rev = await self._handle_conflict(
                             doc_id, uploaded, base_url, http, auth, headers
                         )
@@ -342,6 +524,54 @@ class AttachmentPostProcessor:
                             break
                         current_rev = fresh_rev
                         continue
+                    if exc.status in (401, 403):
+                        log_event(
+                            logger,
+                            "error",
+                            "ATTACHMENT",
+                            "source DELETE attachment unauthorized: %s" % name,
+                            pp_action="delete_attachments",
+                            doc_id=doc_id,
+                            doc_rev=current_rev,
+                            http_method="DELETE",
+                            status=exc.status,
+                            elapsed_ms=round(elapsed_ms, 1),
+                            attempt=attempt,
+                            error_detail=str(exc)[:200],
+                        )
+                        raise
+                    log_event(
+                        logger,
+                        "error",
+                        "ATTACHMENT",
+                        "source DELETE attachment http error: %s" % name,
+                        pp_action="delete_attachments",
+                        doc_id=doc_id,
+                        doc_rev=current_rev,
+                        http_method="DELETE",
+                        status=exc.status,
+                        elapsed_ms=round(elapsed_ms, 1),
+                        attempt=attempt,
+                        error_class=type(exc).__name__,
+                        error_detail=str(exc)[:200],
+                    )
+                    raise
+                except (asyncio.TimeoutError, ConnectionError) as exc:
+                    elapsed_ms = (time.monotonic() - t0) * 1000.0
+                    log_event(
+                        logger,
+                        "error",
+                        "ATTACHMENT",
+                        "source DELETE attachment timeout/connection error: %s" % name,
+                        pp_action="delete_attachments",
+                        doc_id=doc_id,
+                        doc_rev=current_rev,
+                        http_method="DELETE",
+                        elapsed_ms=round(elapsed_ms, 1),
+                        attempt=attempt,
+                        error_class=type(exc).__name__,
+                        error_detail=str(exc)[:200],
+                    )
                     raise
 
             if not deleted:
@@ -351,7 +581,9 @@ class AttachmentPostProcessor:
                     "warn",
                     "ATTACHMENT",
                     "failed to delete attachment %s after retries" % name,
+                    pp_action="delete_attachments",
                     doc_id=doc_id,
+                    doc_rev=current_rev,
                 )
 
         log_event(
@@ -359,7 +591,9 @@ class AttachmentPostProcessor:
             "info",
             "ATTACHMENT",
             "post-process delete_attachments completed",
+            pp_action="delete_attachments",
             doc_id=doc_id,
+            new_rev=current_rev,
         )
         doc["_rev"] = current_rev
         return doc
@@ -398,21 +632,95 @@ class AttachmentPostProcessor:
         req_headers["Content-Type"] = "application/json"
         purge_body = json.dumps({doc_id: ["*"]})
 
-        resp = await http.request(
-            "POST",
-            purge_url,
-            data=purge_body,
-            auth=admin_auth,
-            headers=req_headers,
+        log_event(
+            logger,
+            "debug",
+            "ATTACHMENT",
+            "source POST _purge begin",
+            pp_action="purge",
+            doc_id=doc_id,
+            http_method="POST",
+            url=purge_url,
         )
-        resp.release()
+        t0 = time.monotonic()
+        try:
+            resp = await http.request(
+                "POST",
+                purge_url,
+                data=purge_body,
+                auth=admin_auth,
+                headers=req_headers,
+            )
+            resp.release()
+            elapsed_ms = (time.monotonic() - t0) * 1000.0
+        except ClientHTTPError as exc:
+            elapsed_ms = (time.monotonic() - t0) * 1000.0
+            if exc.status in (401, 403):
+                log_event(
+                    logger,
+                    "error",
+                    "ATTACHMENT",
+                    "source POST _purge unauthorized",
+                    pp_action="purge",
+                    doc_id=doc_id,
+                    http_method="POST",
+                    status=exc.status,
+                    elapsed_ms=round(elapsed_ms, 1),
+                    error_detail=str(exc)[:200],
+                )
+            elif exc.status == 404:
+                log_event(
+                    logger,
+                    "warn",
+                    "ATTACHMENT",
+                    "source POST _purge 404 not_found",
+                    pp_action="purge",
+                    doc_id=doc_id,
+                    http_method="POST",
+                    status=404,
+                    elapsed_ms=round(elapsed_ms, 1),
+                )
+            else:
+                log_event(
+                    logger,
+                    "error",
+                    "ATTACHMENT",
+                    "source POST _purge http error",
+                    pp_action="purge",
+                    doc_id=doc_id,
+                    http_method="POST",
+                    status=exc.status,
+                    elapsed_ms=round(elapsed_ms, 1),
+                    error_class=type(exc).__name__,
+                    error_detail=str(exc)[:200],
+                )
+            raise
+        except (asyncio.TimeoutError, ConnectionError) as exc:
+            elapsed_ms = (time.monotonic() - t0) * 1000.0
+            log_event(
+                logger,
+                "error",
+                "ATTACHMENT",
+                "source POST _purge timeout/connection error",
+                pp_action="purge",
+                doc_id=doc_id,
+                http_method="POST",
+                elapsed_ms=round(elapsed_ms, 1),
+                error_class=type(exc).__name__,
+                error_detail=str(exc)[:200],
+            )
+            raise
 
         log_event(
             logger,
             "info",
             "ATTACHMENT",
-            "post-process purge succeeded",
+            "source POST _purge ok — post-process purge succeeded",
+            pp_action="purge",
             doc_id=doc_id,
+            http_method="POST",
+            status=200,
+            elapsed_ms=round(elapsed_ms, 1),
         )
         return doc
 
@@ -442,6 +750,7 @@ class AttachmentPostProcessor:
         http: RetryableHTTP,
         auth: aiohttp.BasicAuth | None,
         headers: dict,
+        pp_action: str = "put_doc",
     ) -> tuple[bool, str]:
         """PUT a document back to the source.
 
@@ -451,6 +760,10 @@ class AttachmentPostProcessor:
 
         Raises on other HTTP errors or if ``on_doc_missing`` is
         ``"fail"`` and the doc is 404.
+
+        Every outcome is logged for audit/debug per GUIDE_LOGGING.md:
+        success records the new ``_rev`` returned by the source as a
+        receipt; failures record the HTTP status and error class.
         """
         url = "%s/%s?rev=%s" % (
             base_url.rstrip("/"),
@@ -460,20 +773,136 @@ class AttachmentPostProcessor:
         req_headers = dict(headers)
         req_headers["Content-Type"] = "application/json"
 
+        log_event(
+            logger,
+            "debug",
+            "ATTACHMENT",
+            "source PUT begin",
+            pp_action=pp_action,
+            doc_id=doc_id,
+            doc_rev=rev,
+            http_method="PUT",
+            url=url,
+        )
+
+        t0 = time.monotonic()
         try:
             resp = await http.request(
                 "PUT", url, data=json.dumps(body), auth=auth, headers=req_headers
             )
             resp_body = await resp.json()
             resp.release()
-            return True, resp_body.get("rev", rev)
+            new_rev = resp_body.get("rev", rev)
+            elapsed_ms = (time.monotonic() - t0) * 1000.0
+            # Receipt: log the new _rev returned by the source on success
+            log_event(
+                logger,
+                "info",
+                "ATTACHMENT",
+                "source PUT ok (receipt)",
+                pp_action=pp_action,
+                doc_id=doc_id,
+                doc_rev=rev,
+                new_rev=new_rev,
+                http_method="PUT",
+                status=200,
+                elapsed_ms=round(elapsed_ms, 1),
+            )
+            return True, new_rev
         except ClientHTTPError as exc:
+            elapsed_ms = (time.monotonic() - t0) * 1000.0
             if exc.status == 404:
+                log_event(
+                    logger,
+                    "warn",
+                    "ATTACHMENT",
+                    "source PUT 404 not_found (doc missing)",
+                    pp_action=pp_action,
+                    doc_id=doc_id,
+                    doc_rev=rev,
+                    http_method="PUT",
+                    status=404,
+                    elapsed_ms=round(elapsed_ms, 1),
+                    error_detail=str(exc)[:200],
+                )
                 self._handle_missing_doc(doc_id, "put_doc")
                 return False, ""
             if exc.status == 409:
                 self._inc("attachments_conflict_retries_total")
+                log_event(
+                    logger,
+                    "warn",
+                    "ATTACHMENT",
+                    "source PUT 409 conflict (doc changed)",
+                    pp_action=pp_action,
+                    doc_id=doc_id,
+                    doc_rev=rev,
+                    http_method="PUT",
+                    status=409,
+                    elapsed_ms=round(elapsed_ms, 1),
+                )
                 return False, "conflict"
+            if exc.status in (401, 403):
+                log_event(
+                    logger,
+                    "error",
+                    "ATTACHMENT",
+                    "source PUT unauthorized",
+                    pp_action=pp_action,
+                    doc_id=doc_id,
+                    doc_rev=rev,
+                    http_method="PUT",
+                    status=exc.status,
+                    elapsed_ms=round(elapsed_ms, 1),
+                    error_detail=str(exc)[:200],
+                )
+                raise
+            log_event(
+                logger,
+                "error",
+                "ATTACHMENT",
+                "source PUT http error",
+                pp_action=pp_action,
+                doc_id=doc_id,
+                doc_rev=rev,
+                http_method="PUT",
+                status=exc.status,
+                elapsed_ms=round(elapsed_ms, 1),
+                error_class=type(exc).__name__,
+                error_detail=str(exc)[:200],
+            )
+            raise
+        except (asyncio.TimeoutError, ConnectionError) as exc:
+            elapsed_ms = (time.monotonic() - t0) * 1000.0
+            log_event(
+                logger,
+                "error",
+                "ATTACHMENT",
+                "source PUT timeout/connection error",
+                pp_action=pp_action,
+                doc_id=doc_id,
+                doc_rev=rev,
+                http_method="PUT",
+                elapsed_ms=round(elapsed_ms, 1),
+                error_class=type(exc).__name__,
+                error_detail=str(exc)[:200],
+            )
+            raise
+        except Exception as exc:
+            elapsed_ms = (time.monotonic() - t0) * 1000.0
+            log_event(
+                logger,
+                "error",
+                "ATTACHMENT",
+                "source PUT unexpected error",
+                pp_action=pp_action,
+                doc_id=doc_id,
+                doc_rev=rev,
+                http_method="PUT",
+                elapsed_ms=round(elapsed_ms, 1),
+                error_class=type(exc).__name__,
+                error_detail=str(exc)[:200],
+            )
             raise
 
     async def _handle_conflict(

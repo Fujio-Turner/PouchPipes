@@ -318,6 +318,18 @@ _EXTRA_FIELDS = (
     ("failed", "failed"),
     ("filtered_out", "filt_out"),
     ("checkpoint", "chkpt"),
+    # DLQ replay fields
+    ("dlq_id", "dlq_id"),
+    ("replay_attempts", "replay_att"),
+    ("replay_attempt", "replay_att"),
+    ("ttl_seconds", "ttl_s"),
+    # HTTP output fields
+    ("error_class", "err_cls"),
+    ("content_type", "ct"),
+    # Source mutation audit fields (attachment post-process PUT/DELETE)
+    ("doc_rev", "rev"),
+    ("new_rev", "new_rev"),
+    ("pp_action", "pp_action"),
 )
 
 
